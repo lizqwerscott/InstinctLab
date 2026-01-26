@@ -155,12 +155,17 @@ class PerceptiveShadowingSceneCfg(InteractiveSceneCfg):
             #     maxpool_kernel_size=1,
             # ),
             # "depth_artifact_noise": DepthArtifactNoiseCfg(),
+            # "reflection_artifact_noise": DepthArtifactNoiseCfg(noise_value=30.0),
             # "stereo_noise": RangeBasedGaussianNoiseCfg(
             #     max_value=1.2,
             #     min_value=0.12,
             #     noise_std=0.02,
             # ),
             # "sky_artifact_noise": DepthSkyArtifactNoiseCfg(),
+            # "gaussian_blur_noise": GaussianBlurNoiseCfg(
+            #     kernel_size=3,
+            #     sigma=0.5,
+            # ),
             # "stereo_too_close_noise": StereoTooCloseNoiseCfg(),
             # These last two noise model will affect the processing on the onboard device.
             "normalize": DepthNormalizationCfg(
@@ -177,7 +182,6 @@ class PerceptiveShadowingSceneCfg(InteractiveSceneCfg):
         debug_vis=False,
         depth_clipping_behavior="max",  # clip to the maximum value
         min_distance=0.05,
-        max_distance=2.0,
     )
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0
