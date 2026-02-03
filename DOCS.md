@@ -178,6 +178,26 @@ motion_reference_cfg = MotionReferenceManagerCfg(
 )
 ```
 
+
+#### Termination terms to reset motion reference manager
+**NOTE: This termination term must be applied for each motion reference manager you use.**
+
+```python
+from isaaclab.managers import TerminationTermCfg
+
+# Add this to your termination cfg
+class TerminationsCfg:
+    motion_reference_exhausted = TerminationTermCfg(
+        func=instinct_mdp.dataset_exhausted,
+        params={
+            "reference_cfg": SceneEntityCfg("motion_reference"),
+            # "reset_without_notice": True,
+            #### If True, this termination term will only reset the exhausted env in the motion reference manager, but not return any True to reset the environment.
+        },
+    )
+```
+
+
 #### Shadowing Command Configuration
 
 ```python
