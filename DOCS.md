@@ -679,34 +679,30 @@ The `NoisyGroupedRayCasterCamera` extends `GroupedRayCasterCamera` with a config
 ### Example Configuration
 
 ```python
-from instinctlab.sensors.grouped_raycaster import GroupedRayCasterCfg, NoisedGroupedRayCasterCameraCfg
+from instinctlab.sensors import GroupedRayCasterCfg, NoisedGroupedRayCasterCameraCfg
 
 # Configure sensor as scene entity cfg
 grouped_ray_caster = GroupedRayCasterCfg(
-    prim_path="/World/envs/env_.*/Robot/head_link",
-    # NOTE: The prim path must be able to match the bodies in the scene. For single rigid body, the prim path should also end with ".*"
-    mesh_prim_paths=["/World/ground/", "/World/envs/env_.*/Robot/(?!.*head_link).*", "/world/envs/env_.*/cone1/.*"],
-    attach_yaw_only=False,
-    pattern_cfg=PinholeCameraPatternCfg(
-        focal_length=1.0,
-        horizontal_aperture=2 * math.tan(math.radians(89.51) / 2),
-        vertical_aperture=2 * math.tan(math.radians(58.29) / 2),
-    ),
+    prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+    offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+    ray_alignment="yaw",
+    pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+    debug_vis=False,
+    mesh_prim_paths=[
+        "/World/ground",
+        # NOTE: Don't forget to add the robot links in robot-specific configuration file.
+        # GroupedRayCasterCfg.RaycastTargetCfg(prim_expr="/World/envs/env_.*/Robot/torso_link/visuals")
+    ],
 )
 
 # Configure noisy camera (RealSense D435i on Unitree G1 29dof as example)
 noisy_camera = NoisyGroupedRayCasterCameraCfg(
     prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-    mesh_prim_paths=["/World/ground/", "/World/envs/env_.*/Robot/.*"],
-    # Use aux_mesh_and_link_names for those mesh names that are not the same as the link name or be fixed in other links. Check the configuration definition file for more details.
-    aux_mesh_and_link_names={
-        "torso_link_rev_1_0": None,
-        "waist_yaw_link_rev_1_0": "waist_yaw_link",
-        "waist_roll_link_rev_1_0": "waist_roll_link",
-        "head_link": "head_link",
-        "left_rubber_hand": "left_rubber_hand",
-        "right_rubber_hand": "right_rubber_hand",
-    },
+    mesh_prim_paths=[
+        "/World/ground",
+        # NOTE: Don't forget to add the robot links in robot-specific configuration file.
+        # NoisyGroupedRayCasterCameraCfg.RaycastTargetCfg(prim_expr="/World/envs/env_.*/Robot/torso_link/visuals")
+    ],
     offset=NoisyGroupedRayCasterCameraCfg.OffsetCfg(
         pos=(
             0.04764571478 + 0.0039635 - 0.0042 * math.cos(math.radians(48)),
@@ -721,7 +717,7 @@ noisy_camera = NoisyGroupedRayCasterCameraCfg(
         ),
         convention="world",
     ),
-    attach_yaw_only=False,
+    ray_alignment="yaw",
     pattern_cfg=patterns.PinholeCameraPatternCfg(
         focal_length=1.0,
         horizontal_aperture=2 * math.tan(math.radians(87) / 2),  # fovx

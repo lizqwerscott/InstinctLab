@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Sequence
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 
-from instinctlab.sensors.volume_points import VolumePoints
+from instinctlab.sensors import VolumePoints
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv

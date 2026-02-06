@@ -8,7 +8,7 @@ from isaaclab.envs.mdp.events import _randomize_prop_by_op
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import RayCasterCamera
 
-from instinctlab.sensors.noisy_camera import NoisyGroupedRayCasterCamera, NoisyRayCasterCamera
+from instinctlab.sensors import NoisyGroupedRayCasterCamera, NoisyRayCasterCamera
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv

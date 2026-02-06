@@ -1,20 +1,16 @@
 import numpy as np
 import os
-import yaml
-from dataclasses import MISSING
-from functools import partial
 
 import isaaclab.envs.mdp as mdp
-import isaaclab.sim as sim_utils
-from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs import ViewerCfg
-from isaaclab.managers import EventTermCfg, SceneEntityCfg
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
 import instinctlab.envs.mdp as instinct_mdp
 import instinctlab.tasks.shadowing.mdp as shadowing_mdp
 import instinctlab.tasks.shadowing.perceptive.perceptive_env_cfg as perceptual_cfg
 from instinctlab.assets.unitree_g1 import (
+    G1_29DOF_LINKS,
     G1_29DOF_TORSOBASE_POPSICLE_CFG,
     beyondmimic_action_scale,
     beyondmimic_g1_29dof_actuators,
@@ -25,6 +21,7 @@ from instinctlab.motion_reference import MotionReferenceManagerCfg
 from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMotionCfg as AmassMotionCfgBase
 from instinctlab.motion_reference.motion_files.terrain_motion_cfg import TerrainMotionCfg as TerrainMotionCfgBase
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
+from instinctlab.sensors import get_link_prim_targets
 
 G1_CFG = G1_29DOF_TORSOBASE_POPSICLE_CFG
 
@@ -110,6 +107,8 @@ class G1PerceptiveShadowingEnvCfg(perceptual_cfg.PerceptiveShadowingEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
+
+        self.scene.camera.mesh_prim_paths.extend(get_link_prim_targets(G1_29DOF_LINKS))
 
         self.scene.robot.actuators = beyondmimic_g1_29dof_actuators
         # self.scene.robot.spawn.rigid_props.max_depenetration_velocity = 0.3

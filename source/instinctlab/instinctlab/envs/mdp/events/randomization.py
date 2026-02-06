@@ -10,12 +10,12 @@ from isaaclab.envs.mdp.events import _randomize_prop_by_op
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import RayCaster
 
-from instinctlab.sensors.grouped_ray_caster import GroupedRayCaster
+from instinctlab.sensors import GroupedRayCaster
 
 if TYPE_CHECKING:
     from isaaclab.sensors import Camera, RayCasterCamera
 
-    from instinctlab.sensors.grouped_ray_caster import GroupedRayCasterCamera
+    from instinctlab.sensors import GroupedRayCasterCamera
 
 
 def randomize_default_joint_pos(

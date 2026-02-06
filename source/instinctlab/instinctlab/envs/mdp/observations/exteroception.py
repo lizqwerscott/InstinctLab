@@ -16,8 +16,7 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
     from isaaclab.sensors import Camera, RayCasterCamera, TiledCamera
 
-    from instinctlab.sensors.grouped_ray_caster import GroupedRayCasterCamera
-    from instinctlab.sensors.noisy_camera import NoisyGroupedRayCasterCamera
+    from instinctlab.sensors import GroupedRayCasterCamera, NoisyGroupedRayCasterCamera
 
 
 def _debug_visualize_image(
