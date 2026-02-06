@@ -106,11 +106,13 @@ def raycast_mesh_kernel_grouped_transformed(
     ray_distance: wp.array(dtype=wp.float32),
     ray_normal: wp.array(dtype=wp.vec3),
     ray_face_id: wp.array(dtype=wp.int32),
+    ray_mesh_id: wp.array(dtype=wp.int16),
     max_dist: float = 1e6,
     min_dist: float = 0.0,
     return_distance: int = False,
     return_normal: int = False,
     return_face_id: int = False,
+    return_mesh_id: int = False,
 ):
     tid = wp.tid()
     t = float(0.0)  # hit distance along ray
@@ -136,18 +138,18 @@ def raycast_mesh_kernel_grouped_transformed(
         direction_local = wp.transform_vector(mesh_inv_transform, direction)
 
         # ray cast against the mesh and store the hit position
-        hit_success = wp.mesh_query_ray(
-            mesh_prototype, start_local, direction_local, ray_distance_buf, t, u, v, sign, n, f
-        )
-
-        if hit_success and t < ray_distance_buf and t > min_dist:
-            ray_hits[tid] = start + direction * t
-            ray_distance_buf = t
+        query_returns = wp.mesh_query_ray(mesh_prototype, start_local, direction_local, max_dist)
+        # if the ray hit, store the hit data
+        if query_returns.result and query_returns.t < ray_distance_buf and query_returns.t > min_dist:
+            ray_hits[tid] = start + direction * query_returns.t
+            ray_distance_buf = query_returns.t
             if return_distance == 1:
-                ray_distance[tid] = t
+                ray_distance[tid] = query_returns.t
             if return_normal == 1:
                 # transform the normal back to world space
-                n = wp.transform_vector(mesh_transform, n)
+                n = wp.transform_vector(mesh_transform, query_returns.normal)
                 ray_normal[tid] = n
             if return_face_id == 1:
-                ray_face_id[tid] = f
+                ray_face_id[tid] = query_returns.face
+            if return_mesh_id == 1:
+                ray_mesh_id[tid] = wp.int16(mesh_idx)

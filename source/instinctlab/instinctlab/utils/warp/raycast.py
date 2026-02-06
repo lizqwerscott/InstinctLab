@@ -28,7 +28,8 @@ def raycast_mesh_grouped(
     return_distance: bool = False,
     return_normal: bool = False,
     return_face_id: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    return_mesh_id: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     """Performs ray-casting against a mesh with different collision groups.
 
     - Each ray and mesh has their own collision group ID.
@@ -92,6 +93,13 @@ def raycast_mesh_grouped(
         ray_face_id = None
         ray_face_id_wp = wp.empty((1,), dtype=wp.int32, device=torch_device)
 
+    if return_mesh_id:
+        ray_mesh_id = torch.full((num_rays,), -1, dtype=torch.int16, device=torch_device).contiguous()
+        ray_mesh_id_wp = wp.from_torch(ray_mesh_id, dtype=wp.int16)
+    else:
+        ray_mesh_id = None
+        ray_mesh_id_wp = wp.empty((1,), dtype=wp.int16, device=torch_device)
+
     # launch the warp kernel
     wp.launch(
         kernel=kernels.raycast_mesh_kernel_grouped_transformed,
@@ -109,11 +117,13 @@ def raycast_mesh_grouped(
             ray_distance_wp,
             ray_normal_wp,
             ray_face_id_wp,
+            ray_mesh_id_wp,
             max_dist,
             min_dist,
             int(return_distance),
             int(return_normal),
             int(return_face_id),
+            int(return_mesh_id),
         ],
         device=mesh_wp_device,
     )
@@ -126,5 +136,6 @@ def raycast_mesh_grouped(
         ray_normal = ray_normal.to(device).view(shape)
     if return_face_id:
         ray_face_id = ray_face_id.to(device).view(shape[0], shape[1])
-
-    return ray_hits.to(device).view(shape), ray_distance, ray_normal, ray_face_id
+    if return_mesh_id:
+        ray_mesh_id = ray_mesh_id.to(device).view(shape[0], shape[1])
+    return ray_hits.to(device).view(shape), ray_distance, ray_normal, ray_face_id, ray_mesh_id

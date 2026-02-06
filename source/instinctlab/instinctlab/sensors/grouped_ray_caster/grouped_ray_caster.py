@@ -186,7 +186,7 @@ class GroupedRayCaster(MultiMeshRayCaster):
         mesh_transforms, mesh_inv_transforms = self._get_mesh_transforms_and_inv_transforms()
 
         mesh_wp = [i for i in GroupedRayCaster.meshes.values()][0]
-        self._data.ray_hits_w[env_ids], ray_depth, ray_normal, _ = raycast_mesh_grouped(
+        self._data.ray_hits_w[env_ids], _, _, _, _ = raycast_mesh_grouped(
             mesh_wp_device=mesh_wp.device,
             mesh_prototype_ids=self._mesh_prototype_ids,
             mesh_transforms=mesh_transforms,
