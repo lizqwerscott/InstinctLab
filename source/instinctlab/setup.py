@@ -20,6 +20,7 @@ INSTALL_REQUIRES = [
     "snakeviz",
     "trimesh[all]",
     "scikit-learn",
+    "opencv-python",
 ]
 
 # Installation operation

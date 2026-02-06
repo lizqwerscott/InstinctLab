@@ -3,6 +3,8 @@ import torch
 
 import warp as wp
 
+from isaaclab.utils.math import convert_quat
+
 # disable warp module initialization messages
 wp.config.quiet = True
 # initialize the warp module
@@ -12,7 +14,7 @@ from . import kernels
 
 
 def raycast_mesh_grouped(
-    mesh_prototypes: dict[str, wp.Mesh],
+    mesh_wp_device: wp.context.Device,
     mesh_prototype_ids: torch.Tensor,
     mesh_transforms: torch.Tensor,
     mesh_inv_transforms: torch.Tensor,
@@ -40,8 +42,7 @@ def raycast_mesh_grouped(
     shape = ray_starts.shape
     device = ray_starts.device
     # device of the mesh
-    meshes = [m for m in mesh_prototypes.values()][0]
-    torch_device = wp.device_to_torch(meshes[0].device)
+    torch_device = wp.device_to_torch(mesh_wp_device)
     # reshape the tensors
     ray_starts = ray_starts.to(torch_device).view(-1, 3).contiguous()
     ray_directions = ray_directions.to(torch_device).view(-1, 3).contiguous()
@@ -53,8 +54,16 @@ def raycast_mesh_grouped(
     ray_hits = torch.full((num_rays, 3), max_dist, device=torch_device).contiguous()
     # map the memory to warp arrays
     mesh_prototype_ids_wp = wp.from_torch(mesh_prototype_ids, dtype=wp.uint64)
-    mesh_transforms_wp = wp.from_torch(mesh_transforms, dtype=wp.transform)
-    mesh_inv_transforms_wp = wp.from_torch(mesh_inv_transforms, dtype=wp.transform)
+    mesh_transforms_ = torch.concatenate(
+        [mesh_transforms[:, :3], convert_quat(mesh_transforms[:, 3:], to="xyzw")],
+        dim=-1,
+    ).contiguous()
+    mesh_transforms_wp = wp.from_torch(mesh_transforms_, dtype=wp.transform)
+    mesh_inv_transforms_ = torch.concatenate(
+        [mesh_inv_transforms[:, :3], convert_quat(mesh_inv_transforms[:, 3:], to="xyzw")],
+        dim=-1,
+    ).contiguous()
+    mesh_inv_transforms_wp = wp.from_torch(mesh_inv_transforms_, dtype=wp.transform)
     ray_group_ids_wp = wp.from_torch(ray_group_ids, dtype=wp.int32)
     mesh_ids_for_group_wp = wp.from_torch(mesh_ids_for_group, dtype=wp.int32)
     mesh_ids_slice_for_group_wp = wp.from_torch(mesh_ids_slice_for_group, dtype=wp.int32)
@@ -106,7 +115,7 @@ def raycast_mesh_grouped(
             int(return_normal),
             int(return_face_id),
         ],
-        device=meshes[0].device,
+        device=mesh_wp_device,
     )
     # NOTE: Synchronize is not needed anymore, but we keep it for now. Check with @dhoeller and Original implementation in IsaacLab.
     wp.synchronize()
