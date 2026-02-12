@@ -665,7 +665,7 @@ class ProjectedGravityRefCommand(ShadowingCommandBase):
         # get the base frame orientation
         base_quat_w = self._motion_reference.data.base_quat_w[env_ids]
         # project the gravity vector onto the base frame
-        self._command[env_ids] = math_utils.quat_rotate_inverse(base_quat_w, self.GRAVITY_VEC_W[env_ids].unsqueeze(1))
+        self._command[env_ids] = math_utils.quat_apply_inverse(base_quat_w, self.GRAVITY_VEC_W[env_ids].unsqueeze(1))
         # apply the mask
         self._command[env_ids] *= self._motion_reference.data.base_orientation_mask[env_ids].unsqueeze(-1)
         self._command[env_ids] *= self._motion_reference.data.validity[env_ids].unsqueeze(-1)
@@ -1033,7 +1033,7 @@ class BaseLinVelRefCommand(ShadowingCommandBase):
         return mask
 
     def _update_command_by_env_ids(self, env_ids: Sequence[int] | torch.Tensor):
-        self._command[env_ids] = math_utils.quat_rotate_inverse(
+        self._command[env_ids] = math_utils.quat_apply_inverse(
             self._motion_reference.data.base_quat_w[env_ids], self._motion_reference.data.base_lin_vel_w[env_ids]
         )
         self._command[env_ids] *= self._motion_reference.data.validity[env_ids].unsqueeze(-1)

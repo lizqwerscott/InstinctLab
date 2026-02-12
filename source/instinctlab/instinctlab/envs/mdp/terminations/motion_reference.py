@@ -212,8 +212,8 @@ def projected_gravity_far_from_ref(
     ref_rot = motion_reference.data.base_quat_w  # shape: [N, n_frames, 4]
     ref_rot = ref_rot[motion_reference.ALL_INDICES, motion_reference.aiming_frame_idx]
 
-    pg = math_utils.quat_rotate_inverse(rot, robot.data.GRAVITY_VEC_W)
-    ref_pg = math_utils.quat_rotate_inverse(ref_rot, robot.data.GRAVITY_VEC_W)
+    pg = math_utils.quat_apply_inverse(rot, robot.data.GRAVITY_VEC_W)
+    ref_pg = math_utils.quat_apply_inverse(ref_rot, robot.data.GRAVITY_VEC_W)
 
     if z_only:
         diff = (pg[:, 2] - ref_pg[:, 2]).abs()
