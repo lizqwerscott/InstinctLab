@@ -9,6 +9,7 @@ from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.envs.mdp.events import _randomize_prop_by_op
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import RayCaster
+from isaaclab.sensors.ray_caster.ray_cast_utils import obtain_world_pose_from_view
 
 from instinctlab.sensors import GroupedRayCaster
 
@@ -202,9 +203,10 @@ def randomize_camera_offsets(
         camera_euler_pitch,
         camera_euler_yaw,
     )
-    camera_pos_w, camera_quat_w = sensor._compute_view_world_poses(env_ids)
-    camera_pos_w += math_utils.quat_apply(camera_quat_w, camera_offset_pos)
-    camera_quat_w = math_utils.quat_mul(camera_quat_w, camera_offset_quat)
+    camera_pos_w, camera_quat_w = obtain_world_pose_from_view(sensor._view, env_ids)
+    camera_pos_w, camera_quat_w = math_utils.combine_frame_transforms(
+        camera_pos_w, camera_quat_w, camera_offset_pos, camera_offset_quat
+    )
 
     # set the new camera pose
     # Note: the offset will be updated automatically,
