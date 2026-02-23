@@ -20,6 +20,7 @@ INSTALL_REQUIRES = [
     "snakeviz",
     "trimesh[all]",
     "scikit-learn",
+    "opencv-python",
 ]
 
 # Installation operation
@@ -35,11 +36,11 @@ setup(
     install_requires=INSTALL_REQUIRES,
     license="MIT",
     include_package_data=True,
-    python_requires=">=3.10",
+    python_requires=">=3.11",
     classifiers=[
         "Natural Language :: English",
-        "Programming Language :: Python :: 3.10",
-        "Isaac Sim :: 4.5.0",
+        "Programming Language :: Python :: 3.11",
+        "Isaac Sim :: 5.1.0",
     ],
     zip_safe=False,
 )

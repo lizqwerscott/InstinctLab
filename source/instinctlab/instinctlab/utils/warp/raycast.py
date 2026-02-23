@@ -3,6 +3,8 @@ import torch
 
 import warp as wp
 
+from isaaclab.utils.math import convert_quat
+
 # disable warp module initialization messages
 wp.config.quiet = True
 # initialize the warp module
@@ -12,13 +14,13 @@ from . import kernels
 
 
 def raycast_mesh_grouped(
-    mesh_prototypes: dict[str, wp.Mesh],
-    mesh_prototype_ids: torch.Tensor,
+    mesh_wp_device: wp.context.Device,
+    mesh_wp_ids: torch.Tensor,
     mesh_transforms: torch.Tensor,
     mesh_inv_transforms: torch.Tensor,
     ray_group_ids: torch.Tensor,
-    mesh_ids_for_group: torch.Tensor,
-    mesh_ids_slice_for_group: torch.Tensor,
+    mesh_idxs_for_group: torch.Tensor,
+    meah_idxs_slice_for_group: torch.Tensor,
     ray_starts: torch.Tensor,
     ray_directions: torch.Tensor,
     max_dist: float = 1e6,
@@ -26,7 +28,8 @@ def raycast_mesh_grouped(
     return_distance: bool = False,
     return_normal: bool = False,
     return_face_id: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    return_mesh_id: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     """Performs ray-casting against a mesh with different collision groups.
 
     - Each ray and mesh has their own collision group ID.
@@ -40,24 +43,31 @@ def raycast_mesh_grouped(
     shape = ray_starts.shape
     device = ray_starts.device
     # device of the mesh
-    meshes = [m for m in mesh_prototypes.values()][0]
-    torch_device = wp.device_to_torch(meshes[0].device)
+    torch_device = wp.device_to_torch(mesh_wp_device)
     # reshape the tensors
     ray_starts = ray_starts.to(torch_device).view(-1, 3).contiguous()
     ray_directions = ray_directions.to(torch_device).view(-1, 3).contiguous()
     ray_group_ids = ray_group_ids.to(torch_device).view(-1).contiguous()
-    mesh_ids_for_group = mesh_ids_for_group.to(torch_device).contiguous()
-    mesh_ids_slice_for_group = mesh_ids_slice_for_group.to(torch_device).view(-1).contiguous()
+    mesh_idxs_for_group = mesh_idxs_for_group.to(torch_device).contiguous()
+    meah_idxs_slice_for_group = meah_idxs_slice_for_group.to(torch_device).view(-1).contiguous()
     num_rays = ray_starts.shape[0]
     # create output tensor for the ray hits
     ray_hits = torch.full((num_rays, 3), max_dist, device=torch_device).contiguous()
     # map the memory to warp arrays
-    mesh_prototype_ids_wp = wp.from_torch(mesh_prototype_ids, dtype=wp.uint64)
-    mesh_transforms_wp = wp.from_torch(mesh_transforms, dtype=wp.transform)
-    mesh_inv_transforms_wp = wp.from_torch(mesh_inv_transforms, dtype=wp.transform)
+    mesh_wp_ids_wp = wp.from_torch(mesh_wp_ids, dtype=wp.uint64)
+    mesh_transforms_ = torch.concatenate(
+        [mesh_transforms[:, :3], convert_quat(mesh_transforms[:, 3:], to="xyzw")],
+        dim=-1,
+    ).contiguous()
+    mesh_transforms_wp = wp.from_torch(mesh_transforms_, dtype=wp.transform)
+    mesh_inv_transforms_ = torch.concatenate(
+        [mesh_inv_transforms[:, :3], convert_quat(mesh_inv_transforms[:, 3:], to="xyzw")],
+        dim=-1,
+    ).contiguous()
+    mesh_inv_transforms_wp = wp.from_torch(mesh_inv_transforms_, dtype=wp.transform)
     ray_group_ids_wp = wp.from_torch(ray_group_ids, dtype=wp.int32)
-    mesh_ids_for_group_wp = wp.from_torch(mesh_ids_for_group, dtype=wp.int32)
-    mesh_ids_slice_for_group_wp = wp.from_torch(mesh_ids_slice_for_group, dtype=wp.int32)
+    mesh_idxs_for_group_wp = wp.from_torch(mesh_idxs_for_group, dtype=wp.int32)
+    meah_idxs_slice_for_group_wp = wp.from_torch(meah_idxs_slice_for_group, dtype=wp.int32)
     ray_starts_wp = wp.from_torch(ray_starts, dtype=wp.vec3)
     ray_directions_wp = wp.from_torch(ray_directions, dtype=wp.vec3)
     ray_hits_wp = wp.from_torch(ray_hits, dtype=wp.vec3)
@@ -83,30 +93,39 @@ def raycast_mesh_grouped(
         ray_face_id = None
         ray_face_id_wp = wp.empty((1,), dtype=wp.int32, device=torch_device)
 
+    if return_mesh_id:
+        ray_mesh_id = torch.full((num_rays,), -1, dtype=torch.int16, device=torch_device).contiguous()
+        ray_mesh_id_wp = wp.from_torch(ray_mesh_id, dtype=wp.int16)
+    else:
+        ray_mesh_id = None
+        ray_mesh_id_wp = wp.empty((1,), dtype=wp.int16, device=torch_device)
+
     # launch the warp kernel
     wp.launch(
         kernel=kernels.raycast_mesh_kernel_grouped_transformed,
         dim=num_rays,
         inputs=[
-            mesh_prototype_ids_wp,
+            mesh_wp_ids_wp,
             mesh_transforms_wp,
             mesh_inv_transforms_wp,
             ray_group_ids_wp,
-            mesh_ids_for_group_wp,
-            mesh_ids_slice_for_group_wp,
+            mesh_idxs_for_group_wp,
+            meah_idxs_slice_for_group_wp,
             ray_starts_wp,
             ray_directions_wp,
             ray_hits_wp,
             ray_distance_wp,
             ray_normal_wp,
             ray_face_id_wp,
+            ray_mesh_id_wp,
             max_dist,
             min_dist,
             int(return_distance),
             int(return_normal),
             int(return_face_id),
+            int(return_mesh_id),
         ],
-        device=meshes[0].device,
+        device=mesh_wp_device,
     )
     # NOTE: Synchronize is not needed anymore, but we keep it for now. Check with @dhoeller and Original implementation in IsaacLab.
     wp.synchronize()
@@ -117,5 +136,6 @@ def raycast_mesh_grouped(
         ray_normal = ray_normal.to(device).view(shape)
     if return_face_id:
         ray_face_id = ray_face_id.to(device).view(shape[0], shape[1])
-
-    return ray_hits.to(device).view(shape), ray_distance, ray_normal, ray_face_id
+    if return_mesh_id:
+        ray_mesh_id = ray_mesh_id.to(device).view(shape[0], shape[1])
+    return ray_hits.to(device).view(shape), ray_distance, ray_normal, ray_face_id, ray_mesh_id

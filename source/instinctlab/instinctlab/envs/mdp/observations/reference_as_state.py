@@ -72,7 +72,7 @@ def base_lin_vel_reference_as_state(
     motion_reference: MotionReferenceManager = env.scene[asset_cfg.name]
     base_quat_w = motion_reference.reference_frame.base_quat_w[:, 0]
     base_lin_vel_w = motion_reference.reference_frame.base_lin_vel_w[:, 0]
-    base_lin_vel_b = math_utils.quat_rotate_inverse(base_quat_w, base_lin_vel_w)
+    base_lin_vel_b = math_utils.quat_apply_inverse(base_quat_w, base_lin_vel_w)
     return base_lin_vel_b
 
 
@@ -87,7 +87,7 @@ def base_ang_vel_reference_as_state(
     motion_reference: MotionReferenceManager = env.scene[asset_cfg.name]
     base_quat_w = motion_reference.reference_frame.base_quat_w[:, 0]
     base_ang_vel_w = motion_reference.reference_frame.base_ang_vel_w[:, 0]
-    base_ang_vel_b = math_utils.quat_rotate_inverse(base_quat_w, base_ang_vel_w)
+    base_ang_vel_b = math_utils.quat_apply_inverse(base_quat_w, base_ang_vel_w)
     return base_ang_vel_b
 
 
@@ -147,7 +147,7 @@ class projected_gravity_reference_as_state(ManagerTermBase):
         """
         motion_reference: MotionReferenceManager = env.scene[asset_cfg.name]
         root_quat_w = motion_reference.reference_frame.base_quat_w[:, 0]
-        projected_gravity_w = math_utils.quat_rotate_inverse(root_quat_w, self.GRAVITY_VEC_W)
+        projected_gravity_w = math_utils.quat_apply_inverse(root_quat_w, self.GRAVITY_VEC_W)
         return projected_gravity_w
 
 

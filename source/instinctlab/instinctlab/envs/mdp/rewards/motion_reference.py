@@ -166,11 +166,11 @@ class base_position_offset_imitation_gauss(ManagerTermBase):
             self.motion_reference.reference_frame.base_pos_w[:, 0] - self.reference_position_marker
         )  # (batch_size, 3)
         if in_base_frame:
-            asset_pos_offset = math_utils.quat_rotate_inverse(
+            asset_pos_offset = math_utils.quat_apply_inverse(
                 self.asset_quat_marker,
                 asset_pos_offset,
             )  # (batch_size, 3)
-            reference_pos_offset = math_utils.quat_rotate_inverse(
+            reference_pos_offset = math_utils.quat_apply_inverse(
                 self.reference_quat_marker,
                 reference_pos_offset,
             )  # (batch_size, 3)
@@ -232,7 +232,7 @@ def base_velocity_imitation_gauss(
     base_vel_ref_w = motion_reference.reference_frame.base_lin_vel_w[:, 0]  # (batch_size, 6)
     if in_base_frame:
         root_quat_w = motion_reference.reference_frame.base_quat_w[:, 0]  # (batch_size, 4)
-        base_vel_ref = math_utils.quat_rotate_inverse(
+        base_vel_ref = math_utils.quat_apply_inverse(
             root_quat_w,
             base_vel_ref_w,
         )
@@ -263,7 +263,7 @@ def base_velocity_imitation_square(
     motion_reference: MotionReferenceManager = env.scene[reference_cfg.name]
     asset: RigidObject = env.scene[asset_cfg.name]
     if in_base_frame:
-        base_vel_ref = math_utils.quat_rotate_inverse(
+        base_vel_ref = math_utils.quat_apply_inverse(
             motion_reference.reference_frame.base_quat_w[:, 0],
             motion_reference.reference_frame.base_lin_vel_w[:, 0],  # (batch_size, 3)
         )
@@ -436,10 +436,10 @@ def base_projected_gravity_tracking_gauss(
     quat = asset.data.root_state_w[:, 3:7]
     quat_ref = motion_reference.data.base_quat_w[motion_reference.ALL_INDICES, motion_reference.aiming_frame_idx]
     GRAVITY_VEC_W = asset.data.GRAVITY_VEC_W
-    projected_gravity = math_utils.quat_rotate_inverse(
+    projected_gravity = math_utils.quat_apply_inverse(
         quat, GRAVITY_VEC_W
     )  # (num_envs, 3), projected gravity in the robot's local frame
-    projected_gravity_ref = math_utils.quat_rotate_inverse(
+    projected_gravity_ref = math_utils.quat_apply_inverse(
         quat_ref, GRAVITY_VEC_W
     )  # (num_envs, 3), projected gravity in the robot's local frame
 
@@ -1138,7 +1138,7 @@ def link_lin_vel_imitation_gauss(
         root_ang_vel_w = asset.data.root_ang_vel_w
         links_pos_w = asset.data.body_link_pos_w[:, link_indices]  # (batch_size, num_links, 3)
         link_pos_offset_w = links_pos_w - root_pos_w.unsqueeze(1)  # (batch_size, num_links, 3)
-        link_lin_vel = math_utils.quat_rotate_inverse(
+        link_lin_vel = math_utils.quat_apply_inverse(
             root_quat_w.unsqueeze(1).expand(-1, links_lin_vel_w.shape[1], -1),
             (
                 links_lin_vel_w
@@ -1203,7 +1203,7 @@ def link_ang_vel_imitation_gauss(
     if in_base_frame:
         root_quat_w = asset.data.root_quat_w
         root_ang_vel_w = asset.data.root_ang_vel_w
-        link_ang_vel = math_utils.quat_rotate_inverse(
+        link_ang_vel = math_utils.quat_apply_inverse(
             root_quat_w.unsqueeze(1).expand(-1, links_ang_vel_w.shape[1], -1),
             links_ang_vel_w - root_ang_vel_w.unsqueeze(1),
         )  # (batch_size, num_links, 3)

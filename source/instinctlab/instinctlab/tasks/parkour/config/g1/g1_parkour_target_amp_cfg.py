@@ -6,6 +6,7 @@ from isaaclab.utils import configclass
 
 import instinctlab.tasks.parkour.mdp as mdp
 from instinctlab.assets.unitree_g1 import (
+    G1_29DOF_LINKS,
     G1_29DOF_TORSOBASE_POPSICLE_CFG,
     G1_29Dof_TorsoBase_symmetric_augmentation_joint_mapping,
     G1_29Dof_TorsoBase_symmetric_augmentation_joint_reverse_buf,
@@ -15,6 +16,7 @@ from instinctlab.assets.unitree_g1 import (
 from instinctlab.motion_reference import MotionReferenceManagerCfg
 from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMotionCfg as AmassMotionCfgBase
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
+from instinctlab.sensors import get_link_prim_targets
 from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ParkourEnvCfg
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
@@ -87,6 +89,7 @@ class G1ParkourRoughEnvCfg(ParkourEnvCfg):
         self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG
         self.scene.robot = G1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.actuators = beyondmimic_g1_29dof_delayed_actuators
+        self.scene.camera.mesh_prim_paths.extend(get_link_prim_targets(G1_29DOF_LINKS))
         self.scene.motion_reference = motion_reference_cfg
 
 

@@ -58,7 +58,7 @@ class GroupedRayCasterCameraCfg(GroupedRayCasterCfg):
     """The pattern that defines the local ray starting positions and directions in a pinhole camera pattern."""
 
     visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/RayCaster",
+        prim_path="/Visuals/GroupedRayCasterCamera",
         markers={
             "hit": sim_utils.SphereCfg(
                 radius=0.02,

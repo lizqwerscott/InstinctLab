@@ -26,8 +26,7 @@ import instinctlab.terrains as terrain_gen
 from instinctlab.assets.unitree_g1 import beyondmimic_action_scale
 from instinctlab.managers import MultiRewardCfg
 from instinctlab.motion_reference import MotionReferenceManagerCfg
-from instinctlab.sensors.noisy_camera import NoisyGroupedRayCasterCameraCfg
-from instinctlab.sensors.volume_points import Grid3dPointsGeneratorCfg, VolumePointsCfg
+from instinctlab.sensors import Grid3dPointsGeneratorCfg, NoisyGroupedRayCasterCameraCfg, VolumePointsCfg
 from instinctlab.terrains import GreedyconcatEdgeCylinderCfg, TerrainImporterCfg
 from instinctlab.utils.noise import (
     CropAndResizeCfg,
@@ -319,7 +318,7 @@ class SceneCfg(InteractiveSceneCfg):
     left_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
-        attach_yaw_only=True,
+        ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.12, size=[0.12, 0.0]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
@@ -328,7 +327,7 @@ class SceneCfg(InteractiveSceneCfg):
     right_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
-        attach_yaw_only=True,
+        ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.12, size=[0.12, 0.0]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
@@ -352,8 +351,11 @@ class SceneCfg(InteractiveSceneCfg):
     )
     camera = NoisyGroupedRayCasterCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-        mesh_prim_paths=["/World/ground/", "/World/envs/env_.*/Robot/(?!.*torso_link).*"],
-        attach_yaw_only=False,
+        mesh_prim_paths=[
+            "/World/ground",
+            # NOTE: Don't forget to add the robot links in robot-specific configuration file.
+        ],
+        ray_alignment="yaw",
         pattern_cfg=PinholeCameraPatternCfg(
             focal_length=1.0,
             horizontal_aperture=2 * math.tan(math.radians(89.51) / 2),  # fovx
@@ -379,14 +381,6 @@ class SceneCfg(InteractiveSceneCfg):
             ),
             convention="world",
         ),
-        aux_mesh_and_link_names={
-            "torso_link_rev_1_0": None,
-            "waist_yaw_link_rev_1_0": "waist_yaw_link",
-            "waist_roll_link_rev_1_0": "waist_roll_link",
-            "head_link": "head_link",
-            "left_rubber_hand": "left_rubber_hand",
-            "right_rubber_hand": "right_rubber_hand",
-        },
         min_distance=0.1,
         # noise
         noise_pipeline={

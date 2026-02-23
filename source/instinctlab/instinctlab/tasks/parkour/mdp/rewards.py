@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_rotate_inverse
+from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -117,9 +117,9 @@ def feet_orientation_contact(
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     left_quat = asset.data.body_quat_w[:, asset_cfg.body_ids[0], :]
-    left_projected_gravity = quat_rotate_inverse(left_quat, asset.data.GRAVITY_VEC_W)
+    left_projected_gravity = quat_apply_inverse(left_quat, asset.data.GRAVITY_VEC_W)
     right_quat = asset.data.body_quat_w[:, asset_cfg.body_ids[1], :]
-    right_projected_gravity = quat_rotate_inverse(right_quat, asset.data.GRAVITY_VEC_W)
+    right_projected_gravity = quat_apply_inverse(right_quat, asset.data.GRAVITY_VEC_W)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     net_contact_forces = contact_sensor.data.net_forces_w_history
     is_contact = torch.max(torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > 1
@@ -168,6 +168,6 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     link_quat = asset.data.body_quat_w[:, asset_cfg.body_ids[0], :]
-    link_projected_gravity = quat_rotate_inverse(link_quat, asset.data.GRAVITY_VEC_W)
+    link_projected_gravity = quat_apply_inverse(link_quat, asset.data.GRAVITY_VEC_W)
 
     return torch.sum(torch.square(link_projected_gravity[:, :2]), dim=1)

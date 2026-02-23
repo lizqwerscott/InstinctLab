@@ -30,8 +30,7 @@ from instinctlab.monitors import (
     ShadowingRotationMonitorTerm,
 )
 from instinctlab.motion_reference import MotionReferenceManagerCfg
-from instinctlab.sensors.grouped_ray_caster import GroupedRayCasterCameraCfg
-from instinctlab.sensors.noisy_camera import NoisyGroupedRayCasterCameraCfg
+from instinctlab.sensors import GroupedRayCasterCfg, NoisyGroupedRayCasterCameraCfg
 from instinctlab.tasks.shadowing import mdp as shadowing_mdp
 from instinctlab.terrains.terrain_generator_cfg import FiledTerrainGeneratorCfg
 from instinctlab.terrains.terrain_importer_cfg import TerrainImporterCfg
@@ -110,22 +109,17 @@ class PerceptiveShadowingSceneCfg(InteractiveSceneCfg):
     height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/torso_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-        attach_yaw_only=True,
+        ray_alignment="yaw",
         pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
     camera = NoisyGroupedRayCasterCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-        mesh_prim_paths=["/World/ground/", "/World/envs/env_.*/Robot/.*"],
-        aux_mesh_and_link_names={
-            "torso_link_rev_1_0": None,
-            "waist_yaw_link_rev_1_0": "waist_yaw_link",
-            "waist_roll_link_rev_1_0": "waist_roll_link",
-            "head_link": "head_link",
-            "left_rubber_hand": "left_rubber_hand",
-            "right_rubber_hand": "right_rubber_hand",
-        },
+        mesh_prim_paths=[
+            "/World/ground",
+            # NOTE: Don't forget to add the robot links in robot-specific configuration file.
+        ],
         offset=NoisyGroupedRayCasterCameraCfg.OffsetCfg(
             pos=(
                 0.04764571478 + 0.0039635 - 0.0042 * math.cos(math.radians(48)),
@@ -140,7 +134,6 @@ class PerceptiveShadowingSceneCfg(InteractiveSceneCfg):
             ),
             convention="world",
         ),
-        attach_yaw_only=False,
         pattern_cfg=patterns.PinholeCameraPatternCfg(
             focal_length=1.0,
             horizontal_aperture=2 * math.tan(math.radians(87) / 2),  # fovx
@@ -457,14 +450,15 @@ class EventsCfg:
         },
     )
     base_com = EventTermCfg(
-        func=instinct_mdp.randomize_rigid_body_coms,
+        func=mdp.randomize_rigid_body_com,
         mode="startup",
         params={
+            "com_range": {
+                "x": (-0.025, 0.025),
+                "y": (-0.05, 0.05),
+                "z": (-0.05, 0.05),
+            },
             "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
-            "coms_x_distribution_params": (-0.025, 0.025),
-            "coms_y_distribution_params": (-0.05, 0.05),
-            "coms_z_distribution_params": (-0.05, 0.05),
-            "distribution": "uniform",
         },
     )
     randomize_ray_offsets = EventTermCfg(

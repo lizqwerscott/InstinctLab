@@ -9,149 +9,14 @@ from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.envs.mdp.events import _randomize_prop_by_op
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import RayCaster
+from isaaclab.sensors.ray_caster.ray_cast_utils import obtain_world_pose_from_view
 
-from instinctlab.sensors.grouped_ray_caster import GroupedRayCaster
+from instinctlab.sensors import GroupedRayCaster
 
 if TYPE_CHECKING:
     from isaaclab.sensors import Camera, RayCasterCamera
 
-    from instinctlab.sensors.grouped_ray_caster import GroupedRayCasterCamera
-
-
-def randomize_body_com_uniform(
-    env: ManagerBasedEnv,
-    env_ids: torch.Tensor | None,
-    asset_cfg: SceneEntityCfg,
-    com_pose_range: dict[str, tuple[float, float]] = dict(),
-    operation: Literal["add", "abs"] = "add",
-):
-    """Randomizes the center of mass (COM) of the bodies in the asset.
-
-    Args:
-        - com_pose_range: (dict[str, tuple[float, float]])
-            where keys are ["x", "y", "z", "roll", "pitch", "yaw"]
-            and values are tuples representing the range for each component.
-        - operation: (str) "add" or "abs", determines how the randomization is applied.
-    """
-    # extract the used quantities (to enable type-hinting)
-    asset: Articulation = env.scene[asset_cfg.name]
-
-    # resolve environment ids
-    if env_ids is None:
-        env_ids = torch.arange(env.scene.num_envs, device=asset.device)
-
-    coms = asset.root_physx_view.get_coms().clone()  # (num_envs, num_bodies, 7) (x, y, z, qx, qy, qz, qw)
-    # resolve body indices
-    if asset_cfg.body_ids == slice(None):
-        body_ids = torch.arange(coms.shape[1], dtype=torch.long, device=coms.device)
-        num_bodies = coms.shape[1]
-    else:
-        body_ids = torch.tensor(asset_cfg.body_ids, dtype=torch.long, device=coms.device)
-        num_bodies = len(body_ids)
-    # flatten env_ids and body_ids for indexing
-    env_ids = env_ids.to(coms.device)
-    env_ids_, body_ids_ = torch.meshgrid(env_ids, body_ids, indexing="ij")
-    env_ids_ = env_ids_.flatten()  # (num_envs * num_bodies,)
-    body_ids_ = body_ids_.flatten()  # (num_envs * num_bodies,)
-
-    range_list = [com_pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
-    ranges = torch.tensor(range_list, device=coms.device)  # (6, 2)
-    rand_samples = math_utils.sample_uniform(
-        ranges[:, 0],
-        ranges[:, 1],
-        (len(env_ids) * num_bodies, 6),
-        device=coms.device,
-    )
-    position_samples = rand_samples[..., :3]  # (num_envs * num_bodies, 3)
-    rotation_samples = math_utils.quat_from_euler_xyz(
-        rand_samples[..., 3],
-        rand_samples[..., 4],
-        rand_samples[..., 5],
-    )  # (num_envs * num_bodies, 4) (w, x, y, z)
-    if operation == "add":
-        coms[env_ids_, body_ids_, :3] += position_samples
-        coms[env_ids_, body_ids_, 3:] = math_utils.convert_quat(
-            math_utils.quat_mul(
-                math_utils.convert_quat(coms[env_ids_, body_ids_, 3:], to="wxyz"),
-                rotation_samples,
-            ),
-            to="xyzw",
-        )
-    elif operation == "abs":
-        coms[env_ids_, body_ids_, :3] = position_samples
-        coms[env_ids_, body_ids_, 3:] = math_utils.convert_quat(
-            rotation_samples,
-            to="xyzw",
-        )
-    else:
-        raise ValueError(f"Invalid operation: {operation}. Use 'add' or 'abs'.")
-
-    # set the new COMs to the asset
-    asset.root_physx_view.set_coms(coms.cpu(), env_ids.cpu())
-
-
-def randomize_rigid_body_coms(
-    env: ManagerBasedEnv,
-    env_ids: torch.Tensor | None,
-    asset_cfg: SceneEntityCfg,
-    coms_x_distribution_params: tuple[float, float],
-    coms_y_distribution_params: tuple[float, float],
-    coms_z_distribution_params: tuple[float, float],
-    distribution: Literal["uniform", "log_uniform", "gaussian"] = "uniform",
-):
-    """
-    .. tip::
-        This function uses CPU tensors to assign the body coms. It is recommended to use this function
-        only during the initialization of the environment.
-    """
-    # extract the used quantities (to enable type-hinting)
-    asset: RigidObject | Articulation = env.scene[asset_cfg.name]
-
-    # get the Center of Mass
-    coms = asset.root_physx_view.get_coms()
-
-    # resolve environment ids
-    if env_ids is None:
-        env_ids = torch.arange(env.scene.num_envs, device=coms.device)
-    else:
-        env_ids = env_ids.cpu()
-
-    # resolve body indices
-    if asset_cfg.body_ids == slice(None):
-        body_ids = torch.arange(asset.num_bodies, dtype=torch.int, device=coms.device)
-    else:
-        body_ids = torch.tensor(asset_cfg.body_ids, dtype=torch.int, device=coms.device)
-
-    # sample from given range
-    # note: we modify the coms in-place for all environments
-    #   however, the setter takes care that only the coms of the specified environments are modified
-    coms[..., 0] = _randomize_prop_by_op(
-        coms[..., 0],
-        coms_x_distribution_params,
-        env_ids,
-        body_ids,
-        operation="add",
-        distribution=distribution,
-    )
-    coms[..., 1] = _randomize_prop_by_op(
-        coms[..., 1],
-        coms_y_distribution_params,
-        env_ids,
-        body_ids,
-        operation="add",
-        distribution=distribution,
-    )
-    coms[..., 2] = _randomize_prop_by_op(
-        coms[..., 2],
-        coms_z_distribution_params,
-        env_ids,
-        body_ids,
-        operation="add",
-        distribution=distribution,
-    )
-
-    # set the new coms
-    asset.root_physx_view.set_coms(coms, env_ids)
+    from instinctlab.sensors import GroupedRayCasterCamera
 
 
 def randomize_default_joint_pos(
@@ -338,9 +203,10 @@ def randomize_camera_offsets(
         camera_euler_pitch,
         camera_euler_yaw,
     )
-    camera_pos_w, camera_quat_w = sensor._compute_view_world_poses(env_ids)
-    camera_pos_w += math_utils.quat_apply(camera_quat_w, camera_offset_pos)
-    camera_quat_w = math_utils.quat_mul(camera_quat_w, camera_offset_quat)
+    camera_pos_w, camera_quat_w = obtain_world_pose_from_view(sensor._view, env_ids)
+    camera_pos_w, camera_quat_w = math_utils.combine_frame_transforms(
+        camera_pos_w, camera_quat_w, camera_offset_pos, camera_offset_quat
+    )
 
     # set the new camera pose
     # Note: the offset will be updated automatically,
