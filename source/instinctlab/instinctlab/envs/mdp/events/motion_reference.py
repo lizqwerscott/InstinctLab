@@ -6,10 +6,11 @@ import tqdm
 from typing import TYPE_CHECKING
 
 import isaaclab.utils.math as math_utils
-from isaaclab.assets import Articulation, RigidObject
+from isaaclab.assets import Articulation, RigidObject, RigidObjectCollection
 from isaaclab.managers import SceneEntityCfg
 
 from instinctlab.motion_reference import MotionReferenceManager
+from instinctlab.motion_reference.motion_reference_hoi_data import HoiMotionReferenceData, HoiMotionReferenceState
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -175,6 +176,163 @@ def reset_robot_state_by_reference(
         joint_pos,
         joint_vel,
         env_ids=env_ids,
+    )
+
+
+def _apply_rigid_object_states(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    object_pos: torch.Tensor,
+    object_quat: torch.Tensor,
+    object_lin_vel: torch.Tensor,
+    object_ang_vel: torch.Tensor,
+    object_validity: torch.Tensor,
+    scene_object_names: list[str],
+    rigid_object_collection_cfg: SceneEntityCfg | None,
+):
+    """Helper to apply rigid object states to simulation.
+
+    Args:
+        env: The environment instance.
+        env_ids: Environment IDs to update.
+        object_pos: Object positions [N_env, N_obj, 3].
+        object_quat: Object orientations [N_env, N_obj, 4].
+        object_lin_vel: Object linear velocities [N_env, N_obj, 3].
+        object_ang_vel: Object angular velocities [N_env, N_obj, 3].
+        object_validity: Object validity mask [N_env, N_obj].
+        scene_object_names: List of object names in the scene.
+        rigid_object_collection_cfg: Configuration for rigid object collection (optional).
+    """
+    # Ensure env_ids is on the same device as data
+    if env_ids.device != object_pos.device:
+        env_ids = env_ids.to(object_pos.device)
+
+    if rigid_object_collection_cfg is not None:
+        collection: RigidObjectCollection = env.scene[rigid_object_collection_cfg.name]
+        # Iterate over objects in the collection
+        num_objects = min(object_validity.shape[1], len(scene_object_names), collection.num_objects)
+
+        for obj_idx in range(num_objects):
+            valid_mask = object_validity[:, obj_idx]
+            if not valid_mask.any():
+                continue
+
+            valid_env_ids = env_ids[valid_mask]
+
+            # Prepare pose and velocity
+            root_pose = torch.cat(
+                [object_pos[valid_mask, obj_idx], object_quat[valid_mask, obj_idx]],
+                dim=-1,
+            )
+            root_velocity = torch.cat(
+                [object_lin_vel[valid_mask, obj_idx], object_ang_vel[valid_mask, obj_idx]],
+                dim=-1,
+            )
+
+            collection.write_object_link_pose_to_sim(root_pose.unsqueeze(1), env_ids=valid_env_ids, object_ids=obj_idx)
+            collection.write_object_link_velocity_to_sim(
+                root_velocity.unsqueeze(1), env_ids=valid_env_ids, object_ids=obj_idx
+            )
+        return
+
+    # Individual objects case
+    for obj_idx, entity_name in enumerate(scene_object_names):
+        if obj_idx >= object_validity.shape[1]:
+            break
+
+        valid_mask = object_validity[:, obj_idx]
+        if not valid_mask.any():
+            continue
+
+        if entity_name not in env.scene:
+            continue
+        asset = env.scene[entity_name]
+        if not isinstance(asset, RigidObject):
+            continue
+
+        valid_env_ids = env_ids[valid_mask]
+
+        root_pose = torch.cat(
+            [object_pos[valid_mask, obj_idx], object_quat[valid_mask, obj_idx]],
+            dim=-1,
+        )
+        root_velocity = torch.cat(
+            [object_lin_vel[valid_mask, obj_idx], object_ang_vel[valid_mask, obj_idx]],
+            dim=-1,
+        )
+
+        asset.write_root_pose_to_sim(root_pose, env_ids=valid_env_ids)
+        asset.write_root_velocity_to_sim(root_velocity, env_ids=valid_env_ids)
+
+
+def reset_rigid_objects_state_by_reference(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    motion_ref_cfg: SceneEntityCfg = SceneEntityCfg("motion_reference"),
+    rigid_object_collection_cfg: SceneEntityCfg | None = None,
+):
+    """Reset rigid object states in scene from HOI init reference state.
+
+    This function intentionally uses object index order and ignores object-name matching.
+    """
+    motion_ref: MotionReferenceManager = env.scene[motion_ref_cfg.name]
+    init_state = motion_ref.get_init_reference_state(env_ids)
+
+    if not isinstance(init_state, HoiMotionReferenceState):
+        return
+
+    scene_object_names = getattr(motion_ref.cfg, "scene_object_names", None)
+    if not scene_object_names:
+        return
+
+    env_ids_t = torch.as_tensor(env_ids, device=init_state.object_pos_w.device)
+
+    _apply_rigid_object_states(
+        env,
+        env_ids_t,
+        init_state.object_pos_w[env_ids_t],
+        init_state.object_quat_w[env_ids_t],
+        init_state.object_lin_vel_w[env_ids_t],
+        init_state.object_ang_vel_w[env_ids_t],
+        init_state.object_validity[env_ids_t],
+        scene_object_names,
+        rigid_object_collection_cfg,
+    )
+
+
+def update_rigid_objects_state_by_reference(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    motion_ref_cfg: SceneEntityCfg = SceneEntityCfg("motion_reference"),
+    rigid_object_collection_cfg: SceneEntityCfg | None = None,
+):
+    """Set rigid object states from the current HOI reference frame every step.
+
+    This function uses object index order and ignores object-name matching.
+    """
+    motion_ref: MotionReferenceManager = env.scene[motion_ref_cfg.name]
+    data: HoiMotionReferenceData = motion_ref.data
+    scene_object_names = getattr(motion_ref.cfg, "scene_object_names", None)
+    if not scene_object_names:
+        return
+
+    if not all(
+        hasattr(data, attr)
+        for attr in ("object_pos_w", "object_quat_w", "object_lin_vel_w", "object_ang_vel_w", "object_validity")
+    ):
+        return
+
+    # data shape is [N, T, O, ...]; use the first target frame.
+    _apply_rigid_object_states(
+        env,
+        env_ids,
+        data.object_pos_w[env_ids, 0],
+        data.object_quat_w[env_ids, 0],
+        data.object_lin_vel_w[env_ids, 0],
+        data.object_ang_vel_w[env_ids, 0],
+        data.object_validity[env_ids, 0],
+        scene_object_names,
+        rigid_object_collection_cfg,
     )
 
 

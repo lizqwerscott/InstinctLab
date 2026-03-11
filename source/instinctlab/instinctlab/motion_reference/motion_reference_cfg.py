@@ -10,7 +10,7 @@ from isaaclab.sim import schemas
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from .motion_buffer import MotionBuffer, MotionReferenceData
+from .motion_buffer import MotionBuffer, MotionReferenceData, MotionReferenceState
 from .motion_reference_manager import MotionReferenceManager
 
 
@@ -32,6 +32,14 @@ class MotionReferenceManagerCfg(SensorBaseCfg):
 
     data_class_type: type = MotionReferenceData
     """ The class type of the motion reference data. Use this config to override the default motion reference data class. """
+
+    state_class_type: type = MotionReferenceState
+    """ The class type of the motion reference state. Use this config to override the default motion reference state class. """
+
+    scene_object_names: list[str] = []
+    """ List of rigid body names (str) in the scene config (not the robot's body). The number of objects is inferred from the length of this list.
+    NOTE: If using RigidObjectCollection, these should be the names of the objects within the collection.
+    """
 
     robot_model_path: str | None = None
     """ Robot model (urdf) path to build the robot kinematics chain.

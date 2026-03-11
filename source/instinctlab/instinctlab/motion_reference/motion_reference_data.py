@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import instinctlab.utils.torch as torch_utils
 
@@ -369,6 +369,7 @@ class MotionReferenceData:
         num_joints: int,
         num_links: int,
         device=torch.device("cpu"),
+        **kwargs,
     ) -> MotionReferenceData:
         return_ = MotionReferenceData(
             joint_pos=torch.zeros(num_envs, num_frames, num_joints, device=device),
@@ -400,6 +401,24 @@ class MotionReferenceData:
         return_.link_quat_b[:, :, :, 0] = 1.0  # Set the w component of the link quaternions to 1.0
         return_.link_quat_w[:, :, :, 0] = 1.0  # Set the w component of the link quaternions to 1.0
         return return_
+
+    def reset(self, env_ids: Sequence[int] | torch.Tensor) -> None:
+        """Reset the motion reference data for the given env_ids. Zeros tensors and marks as invalid."""
+        env_ids = torch.as_tensor(env_ids, device=self.validity.device)
+        for field in fields(self):
+            tensor = getattr(self, field.name)
+            if not isinstance(tensor, torch.Tensor) or tensor.shape[0] != self.validity.shape[0]:
+                continue
+            if field.name == "validity":
+                tensor[env_ids] = False
+            elif field.name == "time_to_target_frame":
+                tensor[env_ids] = -1.0
+            elif field.name.endswith("_mask"):
+                tensor[env_ids] = True
+            else:
+                tensor[env_ids] = 0
+                if "quat" in field.name:
+                    tensor[env_ids, ..., 0] = 1.0
 
 
 @dataclass
@@ -438,6 +457,7 @@ class MotionReferenceState:
         num_envs: int,
         num_joints: int,
         device=torch.device("cpu"),
+        **kwargs,
     ) -> MotionReferenceState:
         return_ = MotionReferenceState(
             joint_pos=torch.zeros(num_envs, num_joints, device=device),
