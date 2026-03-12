@@ -291,11 +291,12 @@ class OmomoMotion(AmassMotion):
         target_obj_idxs = self._resolve_object_indices(state_buffer.scene_object_names, motion_ids)
 
         # Fetch from source object slot 0 (each OMOMO file has exactly one object)
-        object_pos_w = self._all_motion_sequences.object_pos_w[motion_ids, frame_selection, 0]
-        object_quat_w = self._all_motion_sequences.object_quat_w[motion_ids, frame_selection, 0]
-        object_lin_vel_w = self._all_motion_sequences.object_lin_vel_w[motion_ids, frame_selection, 0]
-        object_ang_vel_w = self._all_motion_sequences.object_ang_vel_w[motion_ids, frame_selection, 0]
-        object_validity = self._all_motion_sequences.object_validity[motion_ids, frame_selection, 0]
+        # ConcatBatchTensor only accepts (batch_idx, data_idx); object index 0 applied after
+        object_pos_w = self._all_motion_sequences.object_pos_w[motion_ids, frame_selection][..., 0, :]
+        object_quat_w = self._all_motion_sequences.object_quat_w[motion_ids, frame_selection][..., 0, :]
+        object_lin_vel_w = self._all_motion_sequences.object_lin_vel_w[motion_ids, frame_selection][..., 0, :]
+        object_ang_vel_w = self._all_motion_sequences.object_ang_vel_w[motion_ids, frame_selection][..., 0, :]
+        object_validity = self._all_motion_sequences.object_validity[motion_ids, frame_selection][..., 0]
 
         object_pos_w += self._get_motion_based_origin(env_origins, env_ids)
 
@@ -386,22 +387,22 @@ class OmomoMotion(AmassMotion):
 
         object_attrs = ["object_pos_w", "object_quat_w", "object_lin_vel_w", "object_ang_vel_w"]
         for attr in object_attrs:
+            # ConcatBatchTensor only accepts (batch_idx, data_idx); object index 0 applied after
             source_data = getattr(self._all_motion_sequences, attr)[
                 self._assigned_env_motion_selection[assigned_ids_across_frame],
                 frame_selections_flat,
-                0,
-            ].reshape(len(v_env), num_frames, *getattr(data_buffer, attr).shape[3:])
+            ][..., 0, :].reshape(len(v_env), num_frames, *getattr(data_buffer, attr).shape[3:])
 
             if attr == "object_pos_w":
                 source_data += self._get_motion_based_origin(env_origins, v_env).unsqueeze(1).to(self.buffer_device)
 
             getattr(data_buffer, attr)[v_env, :, v_obj] = source_data.to(self.output_device)
 
+        # ConcatBatchTensor only accepts (batch_idx, data_idx); object index 0 applied after
         source_validity = self._all_motion_sequences.object_validity[
             self._assigned_env_motion_selection[assigned_ids_across_frame],
             frame_selections_flat,
-            0,
-        ].reshape(len(v_env), num_frames)
+        ][..., 0].reshape(len(v_env), num_frames)
 
         data_buffer.object_validity[v_env, :, v_obj] = source_validity.to(self.output_device)
         data_buffer.object_validity[v_env, :, v_obj] &= data_buffer.validity[v_env]
