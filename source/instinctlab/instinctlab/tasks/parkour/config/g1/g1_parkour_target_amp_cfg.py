@@ -108,13 +108,13 @@ class G1ParkourRoughEnvCfg_PLAY(G1ParkourRoughEnvCfg):
         super().__post_init__()
         self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG_PLAY
         # make a smaller scene for play
-        self.scene.num_envs = 10
-        self.viewer = ViewerCfg(
-            eye=[4.0, 0.75, 1.0],
-            lookat=[0.0, 0.75, 0.0],
-            origin_type="asset_root",
-            asset_name="robot",
-        )
+        self.scene.num_envs = 1
+        # self.viewer = ViewerCfg(
+        #     eye=[4.0, 0.75, 1.0],
+        #     lookat=[0.0, 0.75, 0.0],
+        #     origin_type="asset_root",
+        #     asset_name="robot",
+        # )
 
         self.scene.env_spacing = 2.5
         self.episode_length_s = 10

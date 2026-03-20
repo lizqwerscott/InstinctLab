@@ -210,16 +210,6 @@ def main():
     # close the simulator
     env.close()
 
-    if args_cli.video:
-        subprocess.run(
-            [
-                "code",
-                "-r",
-                os.path.join(log_dir, "videos", "play", f"model_{resume_path.split('_')[-1].split('.')[0]}-step-0.mp4"),
-            ]
-        )
-
-
 if __name__ == "__main__":
     # run the main function
     main()
