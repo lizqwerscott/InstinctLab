@@ -86,6 +86,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
 from instinctlab.utils.wrappers.instinct_rl import InstinctRlOnPolicyRunnerCfg
+from instinctlab.utils.export_deploy_cfg import export_deploy_cfg
 
 # wait for attach if in debug mode
 if args_cli.debug:
@@ -215,6 +216,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # prevent dumping the config in non-rank-0 process
         dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
         dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+        export_deploy_cfg(env.unwrapped, log_dir)
 
     if args_cli.cprofile:
         import cProfile
