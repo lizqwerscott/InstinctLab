@@ -75,6 +75,16 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
             ranges = env.cfg.commands.base_velocity.ranges.to_dict()
         for item_name in ["lin_vel_x", "lin_vel_y", "ang_vel_z"]:
             ranges[item_name] = list(ranges[item_name])
+
+        if hasattr(env.cfg.commands.base_velocity, "velocity_ranges"):
+            velocity_ranges = env.cfg.commands.base_velocity.velocity_ranges
+            for terrain_name, terrain_velocity_ranges in velocity_ranges.items():
+                new_terrain_velocity_ranges = {}
+                for item_name in ["lin_vel_x", "lin_vel_y", "ang_vel_z"]:
+                    new_terrain_velocity_ranges[item_name] = list(terrain_velocity_ranges[item_name])
+                velocity_ranges[terrain_name] = new_terrain_velocity_ranges
+            cfg["commands"]["base_velocity"]["velocity_ranges"] = velocity_ranges
+
         cfg["commands"]["base_velocity"]["ranges"] = ranges
 
     # --- actions ---
