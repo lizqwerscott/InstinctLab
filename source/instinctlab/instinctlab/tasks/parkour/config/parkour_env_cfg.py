@@ -434,17 +434,17 @@ class ObservationsCfg:
             params={"command_name": "base_velocity"},
             noise=None,
         )
-        joint_pos = ObsTerm(
+        joint_pos_rel = ObsTerm(
             func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01), history_length=8, flatten_history_dim=True
         )
-        joint_vel = ObsTerm(
+        joint_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
             noise=Unoise(n_min=-0.5, n_max=0.5),
             scale=0.05,
             history_length=8,
             flatten_history_dim=True,
         )
-        actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
+        last_action = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
         depth_image = ObsTerm(
             func=mdp.delayed_visualizable_image,
             params={
@@ -609,7 +609,7 @@ class ObservationsCfg:
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    joint_pos = mdp.JointPositionActionCfg(
+    JointPositionAction = mdp.JointPositionActionCfg(
         asset_name="robot", joint_names=[".*"], scale=beyondmimic_action_scale, use_default_offset=True
     )
 
