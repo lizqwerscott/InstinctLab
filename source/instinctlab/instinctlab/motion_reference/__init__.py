@@ -9,4 +9,5 @@ FAQ:
 
 from .motion_reference_cfg import MotionReferenceManagerCfg, NoCollisionPropertiesCfg
 from .motion_reference_data import MotionReferenceData, MotionReferenceState, MotionSequence
+from .motion_reference_hoi_data import HoiMotionReferenceData, HoiMotionReferenceState, HoiMotionSequence
 from .motion_reference_manager import MotionReferenceManager

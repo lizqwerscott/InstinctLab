@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Sequence
 from copy import copy
@@ -337,6 +338,7 @@ class MotionReferenceManager(SensorBase):
 
         # Reset motion buffer selection and resample selection
         self._reset_motion_buffers(env_ids)
+        self._reset_data(env_ids)
         self._resample_buffer_collate_params(env_ids)
         self._resample_update_period(env_ids)
 
@@ -551,6 +553,33 @@ class MotionReferenceManager(SensorBase):
     Manager's internal operations.
     """
 
+    def _prepare_data_class_kwargs(self) -> dict:
+        """Prepare the kwargs for the data class `make_empty` method."""
+        make_empty_kwargs: dict = {
+            "device": self.device,
+            "num_joints": self._view.max_dofs,
+            "num_links": self.num_link_to_ref,
+        }
+        sig = inspect.signature(self.cfg.data_class_type.make_empty)
+        if "num_objects" in sig.parameters:
+            scene_object_names = getattr(self.cfg, "scene_object_names", [])
+            make_empty_kwargs["num_objects"] = len(scene_object_names)
+            make_empty_kwargs["scene_object_names"] = scene_object_names
+        return make_empty_kwargs
+
+    def _prepare_state_class_kwargs(self) -> dict:
+        """Prepare the kwargs for the state class `make_empty` method."""
+        make_empty_kwargs: dict = {
+            "device": self.device,
+            "num_joints": self._view.max_dofs,
+        }
+        sig = inspect.signature(self.cfg.state_class_type.make_empty)
+        if "num_objects" in sig.parameters:
+            scene_object_names = getattr(self.cfg, "scene_object_names", [])
+            make_empty_kwargs["num_objects"] = len(scene_object_names)
+            make_empty_kwargs["scene_object_names"] = scene_object_names
+        return make_empty_kwargs
+
     def _initialize_data(self):
         """Initialize _data for the 'sensor' output"""
         self._physics_sim_view = physx.create_simulation_view(self._backend)
@@ -562,28 +591,27 @@ class MotionReferenceManager(SensorBase):
         self._ALL_INDICES = torch.arange(self._view.count, device=self.device)
         self.isaac_joint_names = self._view.shared_metatype.dof_names
 
+        make_empty_data_kwargs = self._prepare_data_class_kwargs()
+
         self._data = self.cfg.data_class_type.make_empty(
             self._view.count,
             self.cfg.num_frames,
-            self._view.max_dofs,
-            self.num_link_to_ref,
-            device=self.device,
+            **make_empty_data_kwargs,
         )
 
         self._reference_frame = self.cfg.data_class_type.make_empty(
             self._view.count,
             1,  # num_frames
-            self._view.max_dofs,
-            self.num_link_to_ref,
-            device=self.device,
+            **make_empty_data_kwargs,
         )
         # Add an additional timestamp to the reference frame data, which is used for lazy update of the reference frame.
         self._reference_frame_timestamp = torch.zeros(self._view.count, device=self.device)
 
-        self._init_reference_state = MotionReferenceState.make_empty(
+        make_empty_state_kwargs = self._prepare_state_class_kwargs()
+
+        self._init_reference_state = self.cfg.state_class_type.make_empty(
             self._view.count,
-            self._view.max_dofs,
-            device=self.device,
+            **make_empty_state_kwargs,
         )
 
         self._aiming_frame_idx = TimestampedBuffer()
@@ -651,6 +679,11 @@ class MotionReferenceManager(SensorBase):
                 env_ids=env_ids[env_ids_this_buffer_mask],  # type: ignore
                 symmetric_augmentation_mask_buffer=self._env_symmetric_augmentation_mask,
             )
+
+    def _reset_data(self, env_ids: Sequence[int] | torch.Tensor):
+        """Reset the reference data / reference frame for the given env_ids."""
+        self._data.reset(env_ids)
+        self._reference_frame.reset(env_ids)
 
     def _resample_buffer_collate_params(self, env_ids: Sequence[int] | torch.Tensor | None = None):
         """Resample values for motion collate behaviors for the given env_ids. E.g. frame_interval_s,
