@@ -32,6 +32,7 @@ from instinctlab.utils.noise import (
     CropAndResizeCfg,
     DepthArtifactNoiseCfg,
     DepthNormalizationCfg,
+    DepthSteroNoiseCfg,
     GaussianBlurNoiseCfg,
     RandomGaussianNoiseCfg,
     RangeBasedGaussianNoiseCfg,
@@ -385,7 +386,21 @@ class SceneCfg(InteractiveSceneCfg):
         # noise
         noise_pipeline={
             "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
+            "gaussian_noise": RangeBasedGaussianNoiseCfg(noise_std = 0.02, min_value = 0.2, max_value = 1.5),
+            "stereo_failure": DepthSteroNoiseCfg(
+                stero_far_distance=2.0,
+                stero_min_distance=0.12,
+                stero_far_noise_std=0.04,
+                stero_near_noise_std=0.015,
+                stero_full_block_artifacts_prob=0.003,
+                stero_full_block_height_mean_std=[5, 2],
+                stero_full_block_width_mean_std=[4, 1],
+                stero_full_block_values=[0.0, 2.5],
+                stero_half_block_spark_prob=0.03,
+                stero_half_block_value=3000,
+            ),
             "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
+            "random_gaussian_noise": RandomGaussianNoiseCfg(noise_mean=0.0, noise_std=1, probability=0.01),
             "depth_normalization": DepthNormalizationCfg(
                 depth_range=(0.0, 2.5),
                 normalize=True,
