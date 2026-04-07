@@ -10,6 +10,8 @@ from torchvision.transforms import GaussianBlur
 
 from instinctlab.utils.buffers import AsyncDelayBuffer
 
+from .depth_noise import DepthNoise
+
 if TYPE_CHECKING:
     from .noise_cfg import (
         BlindSpotNoiseCfg,
@@ -24,6 +26,7 @@ if TYPE_CHECKING:
         LatencyNoiseCfg,
         RandomGaussianNoiseCfg,
         SensorDeadNoiseCfg,
+        ParametricDepthNoiseCfg,
     )
 
 
@@ -710,5 +713,45 @@ class SensorDeadNoiseModel(ImageNoiseModel):
 
     def reset(self, env_ids: Sequence[int] | None = None):
         self._remain_dead_frames[env_ids] = 0
+        if self._data_buffer is not None:
+            self._data_buffer[env_ids] = 0
+
+
+class ParametricDepthNoiseModel(ImageNoiseModel):
+    def __init__(self, cfg: ParametricDepthNoiseCfg, num_envs, device):
+        """Simulating when the sensor is dead and restarting, this may lead to several frames of non-refreshed data."""
+        super().__init__(cfg, num_envs, device)
+        self.depth_noise_model = DepthNoise(focal_length=cfg.focal_length, baseline=cfg.baseline, min_depth=cfg.min_depth, max_depth=cfg.max_depth).to(device)
+        self._data_buffer = None
+
+    def __call__(self, data, cfg: ParametricDepthNoiseCfg, env_ids: torch.Tensor | Sequence[int]):
+        if self._data_buffer is None:
+            self._data_buffer = torch.zeros_like(data[0]).unsqueeze(0).repeat(self.num_envs, *([1] * (data.ndim - 1)))
+
+
+        # Preserve original shape
+        original_shape = data.shape
+            
+        # Convert to (N, 1, H, W) for DepthNoise
+        if data.dim() == 4 and data.shape[-1] == 1:
+            data = data.permute(0, 3, 1, 2)
+        elif data.dim() == 3:
+            data = data.unsqueeze(1)
+
+        noisy_data = self.depth_noise_model(data)
+
+        # Convert back to original format
+        if len(original_shape) == 4:
+            noisy_data = noisy_data.permute(0, 2, 3, 1)
+        else:
+            noisy_data = noisy_data.squeeze(1)
+
+        # Update buffer
+        self._data_buffer[env_ids] = noisy_data
+        return noisy_data
+
+    def reset(self, env_ids: Sequence[int] | None = None):
+        if env_ids is None:
+            env_ids = list(range(self.num_envs))
         if self._data_buffer is not None:
             self._data_buffer[env_ids] = 0

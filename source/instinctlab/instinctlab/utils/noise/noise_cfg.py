@@ -9,6 +9,7 @@ from .noise_model import (
     ImageNoiseModel,
     LatencyNoiseModel,
     SensorDeadNoiseModel,
+    ParametricDepthNoiseModel,
     blind_spot_noise,
     crop_and_resize,
     depth_artifact_noise,
@@ -249,3 +250,34 @@ class SensorDeadNoiseCfg(ImageNoiseCfg):
     """
 
     func = SensorDeadNoiseModel
+
+@configclass
+class SensorDeadNoiseCfg(ImageNoiseCfg):
+    """Configuration for adding sensor dead behavior, which might be autonomous restarted.
+    Thus causing some frames of non-refreshed data.
+    """
+
+    dead_probability: float = 0.01
+    """The probability of the sensor dead."""
+
+    dead_frames: int | list[int] = 90  # 1.5 second at 60Hz
+    """The number of frames to be non-refreshed (before the sensor is restarted).
+    Can be a single number or a list of numbers to be uniformly selected from.
+    """
+
+    func = SensorDeadNoiseModel
+    
+@configclass
+class ParametricDepthNoiseCfg(ImageNoiseCfg):
+    """Configuration for adding sensor dead behavior, which might be autonomous restarted.
+    Thus causing some frames of non-refreshed data.
+    """
+
+    focal_length: float = 31.35  # 像素焦距
+    baseline: float = 0.05
+    min_depth: float = 0.2
+    max_depth: float = 5
+
+    func = ParametricDepthNoiseModel
+
+    
