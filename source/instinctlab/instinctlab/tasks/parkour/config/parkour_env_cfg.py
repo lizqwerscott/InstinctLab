@@ -36,6 +36,7 @@ from instinctlab.utils.noise import (
     GaussianBlurNoiseCfg,
     RandomGaussianNoiseCfg,
     RangeBasedGaussianNoiseCfg,
+    ParametricDepthNoiseCfg
 )
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
@@ -386,21 +387,27 @@ class SceneCfg(InteractiveSceneCfg):
         # noise
         noise_pipeline={
             "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
-            "gaussian_noise": RangeBasedGaussianNoiseCfg(noise_std = 0.02, min_value = 0.2, max_value = 1.5),
-            "stereo_failure": DepthSteroNoiseCfg(
-                stero_far_distance=3.0,
-                stero_min_distance=0.12,
-                stero_far_noise_std=0.08,
-                stero_near_noise_std=0.02,
-                stero_full_block_artifacts_prob=0.002,
-                stero_full_block_values=[0.0, 0.25, 0.5, 1.0, 3.0],
-                stero_full_block_height_mean_std=[18, 2.0],
-                stero_full_block_width_mean_std=[3, 0.5],
-                stero_half_block_spark_prob=0.05,
-                stero_half_block_value=3000,
+            "parametric_depth_noise": ParametricDepthNoiseCfg(
+                focal_length=31.35,
+                baseline=0.05,
+                min_depth=0.2,
+                max_depth=5,
             ),
+            # "gaussian_noise": RangeBasedGaussianNoiseCfg(noise_std = 0.02, min_value = 0.2, max_value = 1.5),
+            # "stereo_failure": DepthSteroNoiseCfg(
+            #     stero_far_distance=3.0,
+            #     stero_min_distance=0.12,
+            #     stero_far_noise_std=0.08,
+            #     stero_near_noise_std=0.02,
+            #     stero_full_block_artifacts_prob=0.002,
+            #     stero_full_block_values=[0.0, 0.25, 0.5, 1.0, 3.0],
+            #     stero_full_block_height_mean_std=[18, 2.0],
+            #     stero_full_block_width_mean_std=[3, 0.5],
+            #     stero_half_block_spark_prob=0.05,
+            #     stero_half_block_value=3000,
+            # ),
             "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
-            "random_gaussian_noise": RandomGaussianNoiseCfg(noise_mean=0.0, noise_std=1, probability=0.05),
+            # "random_gaussian_noise": RandomGaussianNoiseCfg(noise_mean=0.0, noise_std=1, probability=0.05),
             "depth_normalization": DepthNormalizationCfg(
                 depth_range=(0.0, 2.5),
                 normalize=True,
