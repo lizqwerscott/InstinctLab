@@ -22,6 +22,7 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--exportonnx", action="store_true", default=False, help="Export policy as ONNX model.")
+parser.add_argument("--exportjit", action="store_true", default=False, help="Export policy as TorchScript model.")
 parser.add_argument("--debug", action="store_true", default=False, help="Enable debug mode.")
 parser.add_argument("--no_resume", default=None, action="store_true", help="Force play in no resume mode.")
 # custom play arguments
@@ -177,6 +178,12 @@ def main():
                 os.makedirs(export_model_dir)
             obs, _ = env.get_observations()
             ppo_runner.export_as_onnx(obs, export_model_dir)
+        if args_cli.exportjit:
+            assert env.unwrapped.num_envs == 1, "Exporting to JIT is only supported for single environment."
+            if not os.path.exists(export_model_dir):
+                os.makedirs(export_model_dir)
+            obs, _ = env.get_observations()
+            ppo_runner.export_as_jit(obs, export_model_dir, encoder_as_seperate_file=False)
 
     # reset environment
     obs, _ = env.get_observations()
