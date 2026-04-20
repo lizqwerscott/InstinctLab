@@ -41,6 +41,15 @@ from instinctlab.utils.noise import (
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 
+VELOCITY_RANGE = {
+    "x": (-0.5, 0.5),
+    "y": (-0.5, 0.5),
+    "z": (-0.2, 0.2),
+    "roll": (-0.52, 0.52),
+    "pitch": (-0.52, 0.52),
+    "yaw": (-0.78, 0.78),
+}
+
 ##
 # Scene definition
 ##
@@ -919,6 +928,16 @@ class EventCfg:
             "make_consistent": True,
         },
     )
+
+    base_com = EventTerm(
+            func=mdp.randomize_rigid_body_com,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+                "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
+            },
+    )
+    
     # reset
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
@@ -953,6 +972,32 @@ class EventCfg:
         },
     )
 
+    camera_offsets = EventTerm(
+        func=mdp.randomize_camera_offsets,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("camera"),
+            "offset_pose_ranges": {
+                "x": (-0.02, 0.02),
+                "y": (-0.02, 0.02),
+                "z": (-0.02, 0.02),
+                "roll": (-0.08, 0.08),
+                "pitch": (-0.174, 0.174),
+                "yaw": (-0.05, 0.05)
+            },
+            "distribution": "gaussian"
+        },
+    )
+
+    # interval
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity_without_stand,
+        mode="interval",
+        interval_range_s=(1.0, 3.0),
+        params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"), "velocity_range": VELOCITY_RANGE},
+    )
+    
+    
 
 @configclass
 class CurriculumCfg:
