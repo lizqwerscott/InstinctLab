@@ -135,7 +135,16 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                 fractal_lacunarity=2.0,
                 fractal_gain=0.25,
                 centering=True,
-            )
+            ),
+            flat_patch_sampling={
+                "target": FlatPatchSamplingCfg(
+                    num_patches=50,
+                    patch_radius=[0.05, 0.10, 0.15, 0.20],
+                    max_height_diff=0.05,
+                    x_range=(0.0, 0.0),
+                    y_range=(3.7, 3.7),
+                ),
+            }
         ),
         "down_up": terrain_gen.PerlinStairsDownUpTerrainCfg(
             proportion=0.15,
@@ -154,7 +163,16 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                 fractal_lacunarity=2.0,
                 fractal_gain=0.25,
                 centering=True,
-            )
+            ),
+            flat_patch_sampling={
+                "target": FlatPatchSamplingCfg(
+                    num_patches=50,
+                    patch_radius=[0.05, 0.10, 0.15, 0.20],
+                    max_height_diff=0.05,
+                    x_range=(0.0, 0.0),
+                    y_range=(3.7, 3.7),
+                ),
+            }
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
             proportion=0.10,
