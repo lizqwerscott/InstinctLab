@@ -636,7 +636,7 @@ def perlin_stairs_up_down_terrain(difficulty: float, cfg: hf_terrains_cfg.Perlin
         num_steps = cfg.num_steps
     platform_length = cfg.platform_length
     if cfg.per_step_width is None:
-        per_step_width = cfg.size[0]
+        per_step_width = cfg.size[1]
     else:
         per_step_width = cfg.per_step_width
 
@@ -650,29 +650,29 @@ def perlin_stairs_up_down_terrain(difficulty: float, cfg: hf_terrains_cfg.Perlin
     per_step_length = int(per_step_length / cfg.horizontal_scale)
     platform_length = int(platform_length / cfg.horizontal_scale)
     num_steps = int(num_steps)
-    num_steps = min(num_steps, (length_pixels - platform_length) // (2 * per_step_length))
+    num_steps = min(num_steps, (width_pixels - platform_length) // (2 * per_step_length))
 
     # create a terrain with a flat platform at the center
     hf_raw = np.zeros((width_pixels, length_pixels))
     middle_x = width_pixels // 2
     middle_y = length_pixels // 2
-    start_x = middle_x - per_step_width // 2
-    end_x = start_x + per_step_width
-    start_y_up = middle_y - platform_length // 2
-    start_y_down = start_y_up + platform_length
+    start_x_up = middle_x - platform_length // 2
+    start_x_down = start_x_up + platform_length
+    start_y = middle_y - per_step_width // 2
+    end_y = start_y + per_step_width
     for i in range(num_steps):
         # going up
-        start_y = start_y_up - i * per_step_length
-        end_y = start_y + per_step_length
+        start_x = start_x_up - i * per_step_length
+        end_x = start_x + per_step_length
         hf_raw[start_x:end_x, start_y:end_y] = (num_steps - i) * per_step_height
 
         # going down
-        start_y = start_y_down + i * per_step_length
-        end_y = start_y + per_step_length
+        start_x = start_x_down + i * per_step_length
+        end_x = start_x + per_step_length
         hf_raw[start_x:end_x, start_y:end_y] = (num_steps - i) * per_step_height
 
     # add the platform in the center
-    hf_raw[start_x:end_x, start_y_up:start_y_down] = num_steps * per_step_height
+    hf_raw[start_x_up:start_x_down, start_y:end_y] = num_steps * per_step_height
 
     if cfg.perlin_cfg is not None:
         perlin_cfg = cfg.perlin_cfg
@@ -711,7 +711,7 @@ def perlin_stairs_down_up_terrain(difficulty: float, cfg: hf_terrains_cfg.Perlin
 
     platform_length = cfg.platform_length
     if cfg.per_step_width is None:
-        per_step_width = cfg.size[0]
+        per_step_width = cfg.size[1]
     else:
         per_step_width = cfg.per_step_width
 
@@ -725,29 +725,29 @@ def perlin_stairs_down_up_terrain(difficulty: float, cfg: hf_terrains_cfg.Perlin
     per_step_length = int(per_step_length / cfg.horizontal_scale)
     platform_length = int(platform_length / cfg.horizontal_scale)
     num_steps = int(num_steps)
-    num_steps = min(num_steps, (length_pixels - platform_length) // (2 * per_step_length))
+    num_steps = min(num_steps, (width_pixels - platform_length) // (2 * per_step_length))
 
     # create a terrain with a flat platform at the center
     hf_raw = np.zeros((width_pixels, length_pixels))
     middle_x = width_pixels // 2
     middle_y = length_pixels // 2
-    start_x = middle_x - per_step_width // 2
-    end_x = start_x + per_step_width
-    start_y_up = middle_y - platform_length // 2
-    start_y_down = start_y_up + platform_length
+    start_y = middle_y - per_step_width // 2
+    end_y = start_y + per_step_width
+    start_x_up = middle_x - platform_length // 2
+    start_x_down = start_x_up + platform_length
     for i in range(num_steps):
         # going up
-        start_y = start_y_up - i * per_step_length
-        end_y = start_y + per_step_length
+        start_x = start_x_up - i * per_step_length
+        end_x = start_x + per_step_length
         hf_raw[start_x:end_x, start_y:end_y] = -(num_steps - i) * per_step_height
 
         # going down
-        start_y = start_y_down + i * per_step_length
-        end_y = start_y + per_step_length
+        start_x = start_x_down + i * per_step_length
+        end_x = start_x + per_step_length
         hf_raw[start_x:end_x, start_y:end_y] = -(num_steps - i) * per_step_height
 
     # add the platform in the center
-    hf_raw[start_x:end_x, start_y_up:start_y_down] = -num_steps * per_step_height
+    hf_raw[start_x_up:start_x_down, start_y:end_y] = -num_steps * per_step_height
 
     if cfg.perlin_cfg is not None:
         perlin_cfg = cfg.perlin_cfg
