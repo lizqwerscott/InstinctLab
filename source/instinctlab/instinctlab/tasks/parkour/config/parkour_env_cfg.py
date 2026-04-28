@@ -130,10 +130,10 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
         "down_up": terrain_gen.PerlinStairsDownUpTerrainCfg(
             proportion=0.15,
             per_step_height=[0.05, 0.23],
-            per_step_width=1.3,
+            per_step_width=2.0,
             per_step_length=(0.2, 0.4),
             num_steps=(6, 8),
-            platform_length=1.0,
+            platform_length=2.0,
             wall_prob=[0.3, 0.3, 0.3, 0.3],
             wall_height=5.0,
             wall_thickness=0.05,
