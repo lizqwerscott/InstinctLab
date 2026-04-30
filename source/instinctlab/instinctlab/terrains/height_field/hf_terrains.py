@@ -760,6 +760,23 @@ def perlin_stairs_up_down_with_walls_terrain(difficulty: float, cfg: hf_terrains
         # add perlin noise to the terrain
         hf_raw += perlin_noise
 
+    # Manually add walls that are flush and of equal length to the stairs
+    # Randomly decide whether to generate walls based on side_wall_prob
+    if np.random.uniform() < cfg.side_wall_prob:
+        wall_height_px = int(cfg.side_wall_height / cfg.vertical_scale)
+        wall_thickness_px = int(cfg.side_wall_thickness / cfg.horizontal_scale)
+        
+        # 这里的索引范围 stair_start_x:stair_end_x 保证了等长
+        # 这里的 start_y 和 end_y 保证了紧贴
+        stair_start_x = start_x_up - num_steps * per_step_length
+        stair_end_x = start_x_down + num_steps * per_step_length
+        hf_raw[stair_start_x:stair_end_x, max(start_y-wall_thickness_px, 0):start_y] = np.full(
+            (stair_end_x - stair_start_x, start_y - max(start_y-wall_thickness_px, 0)), wall_height_px, dtype=hf_raw.dtype
+        )
+        hf_raw[stair_start_x:stair_end_x, end_y:end_y+wall_thickness_px] = np.full(
+            (stair_end_x - stair_start_x, wall_thickness_px), wall_height_px, dtype=hf_raw.dtype
+        )
+
     # round off the heights to the nearest vertical step
     return np.rint(hf_raw).astype(np.int16)
 

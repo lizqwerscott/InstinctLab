@@ -140,9 +140,10 @@ class PerlinStairsUpDownWithWallsTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixi
 
     # --- 墙体配置 ---
     # 重点：通过 wall_prob 确保墙体固定生成在楼梯左右两侧 [左, 右, 前, 后]
-    wall_prob: List[float] = [1.0, 1.0, 0.0, 0.0]
-    # wall_height 保持默认值 5.0，wall_thickness 设为 0.1 以保证高度场物理鲁棒性
-    wall_thickness: float = 0.1
+    side_wall_prob: List[float] = [1.0, 1.0, 0.0, 0.0]
+    side_wall_height: float = 5.0
+    # wall_height 保持默认值 5.0，wall_thickness 设为 0.2 以保证高度场物理鲁棒性
+    side_wall_thickness: float = 0.2
 
     # --- 噪声配置 ---
     perlin_cfg: PerlinPlaneTerrainCfg | None = None
