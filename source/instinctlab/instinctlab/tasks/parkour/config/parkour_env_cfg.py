@@ -66,7 +66,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     curriculum=True,
     sub_terrains={
         "perlin_rough": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.05,
+            proportion=0.20,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -83,7 +83,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "perlin_rough_stand": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.05,
+            proportion=0.20,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -100,7 +100,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0.20,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -127,7 +127,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_tiny": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.05,
+            proportion=0.10,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2,
@@ -154,7 +154,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0.20,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -181,7 +181,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv_tiny": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.05,
+            proportion=0.10,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.0,
