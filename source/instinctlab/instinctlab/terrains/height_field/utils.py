@@ -76,3 +76,142 @@ def generate_wall(func: Callable) -> Callable:
         return result_meshes, origin
 
     return wrapper
+
+def generate_stairs_side_wall(func: Callable) -> Callable:
+    """Wrapper to add side walls strictly matching the length and width of the stairs.
+    
+    Fully supports tuple/list type configurations for domain randomization.
+    """
+
+    @functools.wraps(func)
+    def wrapper(difficulty: float, cfg):
+        # 1. 率先让原函数执行！
+        # 💡 这是一个更聪明的工程trick：原函数内部已经处理完了噪声和离散化，
+        # 我们其实可以直接从原函数算完的 hf_raw 去推算楼梯几何，或者在原函数执行前先帮它把参数解出来。
+        # 为了保证 x_slice 计算的绝对安全，我们在这里手动解析 cfg 中的元组参数：
+        
+        # 🛡️ 安全检查 1：检查配置对象是否混入了 StairsSideWallCfgMixin 的属性
+        if cfg is None or not hasattr(cfg, "side_wall_prob"):
+            return func(difficulty, cfg)
+            
+        # ---------------------------------------------------------
+        # ⚙️ 【核心修复】动态解析可能存在的元组 (Tuple) 参数
+        # ---------------------------------------------------------
+        # 解析 per_step_length (可能为 float 或 tuple)
+        if isinstance(cfg.per_step_length, (list, tuple)):
+            per_step_length_m = cfg.per_step_length[0] + difficulty * (cfg.per_step_length[1] - cfg.per_step_length[0])
+        else:
+            per_step_length_m = cfg.per_step_length
+
+        # 解析 num_steps (可能为 int 或 tuple)
+        if isinstance(cfg.num_steps, (list, tuple)):
+            num_steps_actual = cfg.num_steps[0] + difficulty * (cfg.num_steps[1] - cfg.num_steps[0])
+        else:
+            num_steps_actual = cfg.num_steps
+        num_steps_int = int(num_steps_actual)
+
+        # 2. 执行底层函数拿到裸楼梯矩阵
+        hf_raw = func(difficulty, cfg)
+        
+        width_pixels = hf_raw.shape[0]   # X 轴总像素
+        length_pixels = hf_raw.shape[1]  # Y 轴总像素
+        
+        # ---------------------------------------------------------
+        # 📐 3. 使用解析出的确切浮点数，安全计算 X 轴起止切片
+        # ---------------------------------------------------------
+        if hasattr(cfg, "platform_length") and hasattr(cfg, "horizontal_scale"):
+            platform_length_px = int(cfg.platform_length / cfg.horizontal_scale)
+            per_step_length_px = int(per_step_length_m / cfg.horizontal_scale) # 转换为离散像素，此时绝对安全！
+            
+            # 对齐原函数的 num_steps 约束条件，防止越界
+            num_steps_int = min(num_steps_int, (width_pixels - platform_length_px) // (2 * per_step_length_px))
+            
+            middle_x = width_pixels // 2
+            start_x_up = middle_x - platform_length_px // 2
+            start_x_down = start_x_up + platform_length_px
+            
+            # 精确锁定楼梯在 X 轴上的像素边界
+            stair_start_x = max(0, start_x_up - num_steps_int * per_step_length_px)
+            stair_end_x = min(width_pixels, start_x_down + num_steps_int * per_step_length_px)
+            
+            x_slice = slice(stair_start_x, stair_end_x)
+        else:
+            x_slice = slice(None)
+
+        # ---------------------------------------------------------
+        # 📐 4. 计算 Y 轴（左右方向）楼梯宽度边界
+        # ---------------------------------------------------------
+        per_step_width_m = getattr(cfg, "per_step_width", None)
+        if per_step_width_m is None:
+            per_step_width_m = cfg.size[1]
+            
+        per_step_width = int(per_step_width_m / cfg.horizontal_scale)
+        middle_y = length_pixels // 2
+        start_y = middle_y - per_step_width // 2
+        end_y = start_y + per_step_width
+        
+        # ---------------------------------------------------------
+        # 🧱 5. 动态计算墙体高度与厚度
+        # ---------------------------------------------------------
+        thickness_pixels = max(1, int(cfg.side_wall_thickness / cfg.horizontal_scale))
+        max_stair_height = np.max(hf_raw)
+        wall_height_discrete = max_stair_height + int(cfg.side_wall_height / cfg.vertical_scale)
+        
+        # ---------------------------------------------------------
+        # 🎲 6. 精准切片砌墙
+        # ---------------------------------------------------------
+        if np.random.uniform() < cfg.side_wall_prob[0]:
+            y_left_start = max(0, start_y - thickness_pixels)
+            hf_raw[x_slice, y_left_start:start_y] = wall_height_discrete
+            
+        if np.random.uniform() < cfg.side_wall_prob[1]:
+            y_right_end = min(length_pixels, end_y + thickness_pixels)
+            hf_raw[x_slice, end_y:y_right_end] = wall_height_discrete
+            
+        return hf_raw
+        
+    return wrapper
+
+
+# def generate_stairs_side_wall(func: Callable) -> Callable:
+#     """Wrapper to add side walls to stairs terrains."""
+
+#     @functools.wraps(func)
+#     def wrapper(difficulty: float, cfg):
+#         hf_raw = func(difficulty, cfg)
+        
+#         # 安全检查 1：检查配置对象是否混入了 StairsSideWallCfgMixin 的属性
+#         if cfg is None or not hasattr(cfg, "side_wall_prob"):
+#             return hf_raw  # 如果没混入侧墙属性，直接原样返回楼梯，不砌墙
+            
+#         width_pixels = hf_raw.shape[0]
+#         length_pixels = hf_raw.shape[1]
+        
+#         # 安全检查 2：动态获取楼梯宽度。如果配置里没配或者为 None，则默认充满整块地形
+#         per_step_width_m = getattr(cfg, "per_step_width", None)
+#         if per_step_width_m is None:
+#             per_step_width_m = cfg.size[1]
+            
+#         # 矩阵索引计算...
+#         per_step_width = int(per_step_width_m / cfg.horizontal_scale)
+#         middle_y = length_pixels // 2
+#         start_y = middle_y - per_step_width // 2
+#         end_y = start_y + per_step_width
+        
+#         # 读取通过 Mixin 继承下来的侧墙参数
+#         thickness_pixels = max(1, int(cfg.side_wall_thickness / cfg.horizontal_scale))
+#         max_stair_height = np.max(hf_raw)
+#         wall_height_discrete = max_stair_height + int(cfg.side_wall_height / cfg.vertical_scale)
+        
+#         # 动态切片砌墙...
+#         if np.random.uniform() < cfg.side_wall_prob[0]:
+#             y_left_start = max(0, start_y - thickness_pixels)
+#             hf_raw[:, y_left_start:start_y] = wall_height_discrete
+            
+#         if np.random.uniform() < cfg.side_wall_prob[1]:
+#             y_right_end = min(length_pixels, end_y + thickness_pixels)
+#             hf_raw[:, end_y:y_right_end] = wall_height_discrete
+            
+#         return hf_raw
+    
+#     return wrapper

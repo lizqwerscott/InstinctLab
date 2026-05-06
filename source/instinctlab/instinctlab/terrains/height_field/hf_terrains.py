@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from . import hf_terrains_cfg
 
 from . import hf_terrains_cfg
-from .utils import generate_wall
+from .utils import generate_wall, generate_stairs_side_wall
 
 
 def generate_perlin_noise(difficulty: float, cfg: hf_terrains_cfg.PerlinPlaneTerrainCfg) -> np.ndarray:
@@ -691,8 +691,9 @@ def perlin_stairs_up_down_terrain(difficulty: float, cfg: hf_terrains_cfg.Perlin
     return np.rint(hf_raw).astype(np.int16)
 
 @generate_wall
-@height_field_to_mesh
-def perlin_stairs_up_down_with_walls_terrain(difficulty: float, cfg: hf_terrains_cfg.PerlinStairsUpDownWithWallsTerrainCfg):
+@height_field_to_mesh   
+@generate_stairs_side_wall  
+def perlin_stairs_up_down_terrain(difficulty: float, cfg: hf_terrains_cfg.PerlinStairsUpDownWithWallsTerrainCfg) -> np.ndarray:
     """Generate a terrain with stairs going up and down."""
     # resolve terrain configuration
     if isinstance(cfg.per_step_height, (list, tuple)):
@@ -760,25 +761,108 @@ def perlin_stairs_up_down_with_walls_terrain(difficulty: float, cfg: hf_terrains
         # add perlin noise to the terrain
         hf_raw += perlin_noise
 
-    # Manually add walls that are flush and of equal length to the stairs
-    # Randomly decide whether to generate walls based on side_wall_prob
-    if np.random.uniform() < cfg.side_wall_prob:
-        wall_height_px = int(cfg.side_wall_height / cfg.vertical_scale)
-        wall_thickness_px = int(cfg.side_wall_thickness / cfg.horizontal_scale)
-        
-        # 这里的索引范围 stair_start_x:stair_end_x 保证了等长
-        # 这里的 start_y 和 end_y 保证了紧贴
-        stair_start_x = start_x_up - num_steps * per_step_length
-        stair_end_x = start_x_down + num_steps * per_step_length
-        hf_raw[stair_start_x:stair_end_x, max(start_y-wall_thickness_px, 0):start_y] = np.full(
-            (stair_end_x - stair_start_x, start_y - max(start_y-wall_thickness_px, 0)), wall_height_px, dtype=hf_raw.dtype
-        )
-        hf_raw[stair_start_x:stair_end_x, end_y:end_y+wall_thickness_px] = np.full(
-            (stair_end_x - stair_start_x, wall_thickness_px), wall_height_px, dtype=hf_raw.dtype
-        )
-
     # round off the heights to the nearest vertical step
     return np.rint(hf_raw).astype(np.int16)
+
+
+# @generate_wall
+# @height_field_to_mesh
+# def perlin_stairs_up_down_with_walls_terrain(difficulty: float, cfg: hf_terrains_cfg.PerlinStairsUpDownWithWallsTerrainCfg):
+#     """Generate a terrain with stairs going up and down."""
+#     # resolve terrain configuration
+#     if isinstance(cfg.per_step_height, (list, tuple)):
+#         per_step_height = cfg.per_step_height[0] + difficulty * (cfg.per_step_height[1] - cfg.per_step_height[0])
+#     else:
+#         per_step_height = cfg.per_step_height
+#     if isinstance(cfg.per_step_length, (list, tuple)):
+#         per_step_length = cfg.per_step_length[0] + difficulty * (cfg.per_step_length[1] - cfg.per_step_length[0])
+#     else:
+#         per_step_length = cfg.per_step_length
+#     if isinstance(cfg.num_steps, (list, tuple)):
+#         num_steps = cfg.num_steps[0] + difficulty * (cfg.num_steps[1] - cfg.num_steps[0])
+#     else:
+#         num_steps = cfg.num_steps
+#     platform_length = cfg.platform_length
+#     if cfg.per_step_width is None:
+#         per_step_width = cfg.size[1]
+#     else:
+#         per_step_width = cfg.per_step_width
+
+#     # switch parameters to discrete units
+#     # -- terrain
+#     width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
+#     length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
+#     # -- steps
+#     per_step_height = int(per_step_height / cfg.vertical_scale)
+#     per_step_width = int(per_step_width / cfg.horizontal_scale)
+#     per_step_length = int(per_step_length / cfg.horizontal_scale)
+#     platform_length = int(platform_length / cfg.horizontal_scale)
+#     num_steps = int(num_steps)
+#     num_steps = min(num_steps, (width_pixels - platform_length) // (2 * per_step_length))
+
+#     # create a terrain with a flat platform at the center
+#     hf_raw = np.zeros((width_pixels, length_pixels))
+#     middle_x = width_pixels // 2
+#     middle_y = length_pixels // 2
+#     start_x_up = middle_x - platform_length // 2
+#     start_x_down = start_x_up + platform_length
+#     start_y = middle_y - per_step_width // 2
+#     end_y = start_y + per_step_width
+#     for i in range(num_steps):
+#         # going up
+#         start_x = start_x_up - i * per_step_length
+#         end_x = start_x + per_step_length
+#         hf_raw[start_x:end_x, start_y:end_y] = (num_steps - i) * per_step_height
+
+#         # going down
+#         start_x = start_x_down + i * per_step_length
+#         end_x = start_x + per_step_length
+#         hf_raw[start_x:end_x, start_y:end_y] = (num_steps - i) * per_step_height
+
+#     # add the platform in the center
+#     hf_raw[start_x_up:start_x_down, start_y:end_y] = num_steps * per_step_height
+
+#     if cfg.perlin_cfg is not None:
+#         perlin_cfg = cfg.perlin_cfg
+#         perlin_cfg.size = cfg.size
+#         perlin_cfg.horizontal_scale = cfg.horizontal_scale
+#         perlin_cfg.vertical_scale = cfg.vertical_scale
+#         perlin_cfg.slope_threshold = cfg.slope_threshold
+#         perlin_noise = generate_perlin_noise(
+#             difficulty,
+#             perlin_cfg,  # type: ignore[arg-type]
+#         )
+#         # add perlin noise to the terrain
+#         hf_raw += perlin_noise
+
+#     # Manually add walls that are flush and of equal length to the stairs
+#     # Randomly decide whether to generate walls based on side_wall_prob
+#     # if np.random.uniform() < cfg.side_wall_prob:
+#     #     wall_height_px = int(cfg.side_wall_height / cfg.vertical_scale)
+#     #     wall_thickness_px = int(cfg.side_wall_thickness / cfg.horizontal_scale)
+        
+#     #     # 这里的索引范围 stair_start_x:stair_end_x 保证了等长
+#     #     # 这里的 start_y 和 end_y 保证了紧贴
+#     #     stair_start_x = start_x_up - num_steps * per_step_length
+#     #     stair_end_x = start_x_down + num_steps * per_step_length
+#     #     hf_raw[stair_start_x:stair_end_x, max(start_y-wall_thickness_px, 0):start_y] = np.full(
+#     #         (stair_end_x - stair_start_x, start_y - max(start_y-wall_thickness_px, 0)), wall_height_px, dtype=hf_raw.dtype
+#     #     )
+#     #     hf_raw[stair_start_x:stair_end_x, end_y:end_y+wall_thickness_px] = np.full(
+#     #         (stair_end_x - stair_start_x, wall_thickness_px), wall_height_px, dtype=hf_raw.dtype
+#     #     )
+
+#     if cfg.enable_side_walls:
+#         # 计算墙体占用的网格像素宽度
+#         wall_pixels = int(cfg.side_wall_thickness / cfg.horizontal_scale)
+#         wall_pixels = max(1, wall_pixels) # 至少占用 1 个网格
+#         max_stairs_height = np.max(hf_raw)
+#         target_wall_height = max_stairs_height + 5 # 比最高一阶再高 0.5 米
+#         hf_raw[:, :wall_pixels] = target_wall_height
+#         hf_raw[:, -wall_pixels:] = target_wall_height
+
+#     # round off the heights to the nearest vertical step
+#     return np.rint(hf_raw).astype(np.int16)
 
 @generate_wall
 @height_field_to_mesh

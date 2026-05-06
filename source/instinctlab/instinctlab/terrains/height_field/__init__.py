@@ -16,4 +16,6 @@ from .hf_terrains_cfg import (
     PerlinTiltedRampTerrainCfg,
     PerlinTiltTerrainCfg,
     PerlinWaveTerrainCfg,
+    PerlinStairsUpDownWithWallsTerrainCfg,
+
 )

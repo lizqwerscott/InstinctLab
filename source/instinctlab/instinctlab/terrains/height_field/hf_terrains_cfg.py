@@ -21,6 +21,10 @@ class WallTerrainCfgMixin:
     wall_height: float = 5.0  # Height of the walls
     wall_thickness: float = 0.05  # Thickness of the walls
 
+class StairsSideWallCfgMixin:
+    side_wall_prob: List[float] = [0.0, 0.0]  # Probability of generating side walls on [left, right] sides
+    side_wall_height: float = 2.0  # Height of the side walls
+    side_wall_thickness: float = 0.2  # Thickness of the side walls
 
 @configclass
 class PerlinPlaneTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
@@ -123,7 +127,7 @@ class PerlinStairsUpDownTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
     perlin_cfg: PerlinPlaneTerrainCfg | None = None
 
 @configclass
-class PerlinStairsUpDownWithWallsTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
+class PerlinStairsUpDownWithWallsTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin, StairsSideWallCfgMixin):
     """Configuration for a stairs up and down parkour terrain with side walls."""
 
     function = hf_terrains.perlin_stairs_up_down_terrain
@@ -132,20 +136,13 @@ class PerlinStairsUpDownWithWallsTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixi
     per_step_width: float | None = None
     """The width of each step. If None, it will be equal to the width of the terrain."""
     per_step_length: tuple[float, float] | float = MISSING
-    """The length of each step along the y-axis."""
+        
     num_steps: tuple[int, int] | int = MISSING
     """The number of steps. Could be a fixed value or a range (min, max)."""
+
     platform_length: float = 1.0
     """The length of the platform at the bottom of the stairs."""
 
-    # --- 墙体配置 ---
-    # 重点：通过 wall_prob 确保墙体固定生成在楼梯左右两侧 [左, 右, 前, 后]
-    side_wall_prob: List[float] = [1.0, 1.0, 0.0, 0.0]
-    side_wall_height: float = 5.0
-    # wall_height 保持默认值 5.0，wall_thickness 设为 0.2 以保证高度场物理鲁棒性
-    side_wall_thickness: float = 0.2
-
-    # --- 噪声配置 ---
     perlin_cfg: PerlinPlaneTerrainCfg | None = None
 
 @configclass
