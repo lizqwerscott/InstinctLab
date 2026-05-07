@@ -24,7 +24,7 @@ class WallTerrainCfgMixin:
 class StairsSideWallCfgMixin:
     side_wall_prob: List[float] = [0.0, 0.0]  # Probability of generating side walls on [left, right] sides
     side_wall_height: float = 2.0  # Height of the side walls
-    side_wall_thickness: float = 0.2  # Thickness of the side walls
+    side_wall_thickness: float = 0.05  # Thickness of the side walls
 
 @configclass
 class PerlinPlaneTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
