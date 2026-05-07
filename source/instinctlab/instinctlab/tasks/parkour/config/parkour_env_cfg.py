@@ -99,7 +99,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                 ),
             },
         ),
-        "up_down": terrain_gen.PerlinStairsUpDownTerrainCfg(
+        "up_down": terrain_gen.PerlinStairsUpDownWithWallsTerrainCfg(
             proportion=0.15,
             per_step_height=[0.05, 0.23],
             per_step_width=2.0,
@@ -109,6 +109,9 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             wall_prob=[0.3, 0.3, 0.3, 0.3],
             wall_height=5.0,
             wall_thickness=0.05,
+            side_wall_prob=[0.8, 0.8],
+            side_wall_height=5.0,
+            side_wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
                 noise_scale=0.05,
                 noise_frequency=20,
@@ -847,7 +850,7 @@ class EventCfg:
                 "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
             },
     )
-    
+
     # reset
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
@@ -906,8 +909,8 @@ class EventCfg:
         interval_range_s=(1.0, 3.0),
         params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"), "velocity_range": VELOCITY_RANGE},
     )
-    
-    
+
+
 
 @configclass
 class CurriculumCfg:
