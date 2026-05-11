@@ -122,7 +122,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
                     x_range=(3.7, 3.7),
-                    y_range=(-0.0, 0.0),
+                    y_range=(-0.7, 0.7),
                 ),
             },
         ),
@@ -149,7 +149,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
                     x_range=(3.7, 3.7),
-                    y_range=(-0.0, 0.0),
+                    y_range=(-0.7, 0.7),
                 ),
             },
         ),
@@ -176,7 +176,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
                     x_range=(3.7, 3.7),
-                    y_range=(-0.0, 0.0),
+                    y_range=(-0.7, 0.7),
                 ),
             },
         ),
@@ -203,7 +203,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
                     x_range=(3.7, 3.7),
-                    y_range=(-0.0, 0.0),
+                    y_range=(-0.7, 0.7),
                 ),
             },
         )
@@ -789,13 +789,13 @@ class EventCfg:
                 "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
             },
     )
-    
+
     # reset
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "yaw": (-0.1, 0.1)},
+            "pose_range": {"x": (-0.7, 0.7), "y": (-0.7, 0.7), "yaw": (-0.78, 0.78)},
             "velocity_range": {
                 "x": (-0.2, 0.2),
                 "y": (-0.2, 0.2),
@@ -848,8 +848,8 @@ class EventCfg:
         interval_range_s=(1.0, 3.0),
         params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"), "velocity_range": VELOCITY_RANGE},
     )
-    
-    
+
+
 
 @configclass
 class CurriculumCfg:
