@@ -25,7 +25,9 @@ class NoisyGroupedRayCasterCamera(NoisyCameraMixin, GroupedRayCasterCamera):
     def _initialize_impl(self):
         super()._initialize_impl()  # type: ignore
         self.build_noise_pipeline()
+        self.build_image_pipeline()
         self.build_history_buffers()
+        
 
     """
     Operations
@@ -35,6 +37,7 @@ class NoisyGroupedRayCasterCamera(NoisyCameraMixin, GroupedRayCasterCamera):
         """Reset the sensor and noise pipeline."""
         super().reset(env_ids)
         self.reset_noise_pipeline(env_ids)
+        self.reset_image_pipeline(env_ids)
         self.reset_history_buffers(env_ids)
 
     """
@@ -46,4 +49,5 @@ class NoisyGroupedRayCasterCamera(NoisyCameraMixin, GroupedRayCasterCamera):
 
         super()._update_buffers_impl(env_ids)
         self.apply_noise_pipeline_to_all_data_types(env_ids)
+        self.apply_image_pipeline_to_all_data_types(env_ids)
         self.update_history_buffers(env_ids)

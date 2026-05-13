@@ -338,7 +338,15 @@ class SceneCfg(InteractiveSceneCfg):
                 output_range=(0.0, 1.0),
             ),
         },
-        data_histories={"distance_to_image_plane_noised": 37},
+        image_pipeline={
+            "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
+            "depth_normalization": DepthNormalizationCfg(
+                depth_range=(0.0, 2.5),
+                normalize=True,
+                output_range=(0.0, 1.0),
+            ),
+        },
+        data_histories={"distance_to_image_plane_noised": 37, "distance_to_image_plane_handled": 37},
     )
     # lights
     sky_light = AssetBaseCfg(
@@ -434,7 +442,7 @@ class ObservationsCfg:
         depth_image = ObsTerm(
             func=mdp.delayed_visualizable_image,
             params={
-                "data_type": "distance_to_image_plane_noised_history",
+                "data_type": "distance_to_image_plane_handled_history",
                 "sensor_cfg": SceneEntityCfg("camera"),
                 "history_skip_frames": 5,
                 "num_output_frames": 8,

@@ -95,6 +95,69 @@ class NoisyCameraMixin:  # as a subclass of SensorBase
             if hasattr(noise_cfg.func, "reset"):
                 noise_cfg.func.reset(env_ids)
 
+
+    def build_image_pipeline(self):
+        self.image_pipeline: Sequence[ImageNoiseCfg] | list[ImageNoiseCfg] = []
+        """Build the image pipeline based on the configuration."""
+
+        for noise_name, noise_cfg in self.cfg.image_pipeline.items():  # type: ignore
+            # Check if the noise configuration is valid
+            if not isinstance(noise_cfg, ImageNoiseCfg):
+                raise ValueError(f"Invalid noise configuration for {noise_name}: {noise_cfg}")
+
+            noise_cfg.device = self.device
+            # Ensure the device is set correctly if the function is not a class
+
+            if isinstance(noise_cfg.func, str):
+                noise_cfg.func = string_to_callable(noise_cfg.func)
+
+            if inspect.isclass(noise_cfg.func):
+                # If the function is a class, instantiate it
+                noise_cfg.func = noise_cfg.func(noise_cfg, num_envs=self.num_instances, device=self.device)
+
+            # Add the noise configuration to the pipeline
+            self.image_pipeline.append(noise_cfg)
+
+        # apply the image pipeline to the initialized output buffers for noised output
+        for data_type in self.cfg.data_types:
+            self._data.output[f"{data_type}_handled"] = self.apply_image_pipeline(
+                self._data.output[data_type], env_ids=self._ALL_INDICES
+            )
+
+    def apply_image_pipeline(self, data: torch.Tensor, env_ids: torch.Tensor | Sequence[int]) -> torch.Tensor:
+        """Apply noise to the data(image).
+        ## NOTE: The input data is only for selected envs (by env_ids).
+        Args:
+            data: The data to which noise will be applied. if Image, the shape should be (N_, H, W, C) for all environments.
+        """
+        # Check if the image pipeline is built
+        if self.image_pipeline is None:
+            raise RuntimeError("Image pipeline not built. Call build_image_pipeline() first.")
+
+        # Apply noise to the image by calling the image pipeline one by one.
+        data = data.clone()
+        for noise_cfg in self.image_pipeline:
+            data = noise_cfg.func(data, noise_cfg, env_ids)  # type: ignore
+
+        return data
+
+    def apply_image_pipeline_to_all_data_types(self, env_ids: torch.Tensor | Sequence[int]):
+        """Apply the image pipeline to all data types."""
+        for data_type in self.cfg.data_types:
+            self._data.output[f"{data_type}_handled"][env_ids] = self.apply_image_pipeline(
+                self._data.output[data_type][env_ids], env_ids=env_ids
+            )
+
+    def reset_image_pipeline(self, env_ids: Sequence[int] | None = None):
+        """Reset the image pipeline for the specified environment IDs."""
+        if self.image_pipeline is None:
+            raise RuntimeError("Image pipeline not built. Call build_image_pipeline() first.")
+
+        for noise_cfg in self.image_pipeline:
+            if hasattr(noise_cfg.func, "reset"):
+                noise_cfg.func.reset(env_ids)
+
+
     """
     History Buffers
     """
