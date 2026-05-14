@@ -29,14 +29,15 @@ from instinctlab.motion_reference import MotionReferenceManagerCfg
 from instinctlab.sensors import Grid3dPointsGeneratorCfg, NoisyGroupedRayCasterCameraCfg, VolumePointsCfg
 from instinctlab.terrains import GreedyconcatEdgeCylinderCfg, TerrainImporterCfg
 from instinctlab.utils.noise import (
+    BlindSpotNoiseCfg,
     CropAndResizeCfg,
-    DepthArtifactNoiseCfg,
+    DepthContourNoiseCfg,
     DepthNormalizationCfg,
-    DepthSteroNoiseCfg,
+    DepthSkyArtifactNoiseCfg,
     GaussianBlurNoiseCfg,
-    RandomGaussianNoiseCfg,
-    RangeBasedGaussianNoiseCfg,
-    ParametricDepthNoiseCfg
+    LatencyNoiseCfg,
+    ParametricDepthNoiseCfg,
+    StereoTooCloseNoiseCfg,
 )
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
@@ -311,27 +312,42 @@ class SceneCfg(InteractiveSceneCfg):
         # noise
         noise_pipeline={
             "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
+            # ---- 条件型几何伪影(在 NYST 之前,基于物理米数判断条件)----
+            # "blind_spot": BlindSpotNoiseCfg(crop_region=(0, 0, 8, 0)),
+            # "depth_contour": DepthContourNoiseCfg(
+            #     contour_threshold=2.0,
+            #     maxpool_kernel_size=1,
+            # ),
+            # "stereo_too_close": StereoTooCloseNoiseCfg(
+            #     close_threshold=0.20,
+            #     full_block_height_mean_std=(20, 2.0),
+            #     full_block_width_mean_std=(3, 0.5),
+            #     full_block_values=[0.0, 0.25, 0.5, 1.0, 2.5],
+            #     full_block_artifacts_prob=0.004,
+            #     half_block_height_mean_std=(2, 3.2),
+            #     half_block_width_mean_std=(2, 3.2),
+            #     half_block_value=2.5,
+            #     half_block_spark_prob=0.02,
+            # ),
+            # ---- NYST 全图弥散性噪声 ----
             "parametric_depth_noise": ParametricDepthNoiseCfg(
                 focal_length=31.35,
                 baseline=0.05,
                 min_depth=0.2,
                 max_depth=5,
             ),
-            # "gaussian_noise": RangeBasedGaussianNoiseCfg(noise_std = 0.02, min_value = 0.2, max_value = 1.5),
-            # "stereo_failure": DepthSteroNoiseCfg(
-            #     stero_far_distance=3.0,
-            #     stero_min_distance=0.12,
-            #     stero_far_noise_std=0.08,
-            #     stero_near_noise_std=0.02,
-            #     stero_full_block_artifacts_prob=0.002,
-            #     stero_full_block_values=[0.0, 0.25, 0.5, 1.0, 3.0],
-            #     stero_full_block_height_mean_std=[18, 2.0],
-            #     stero_full_block_width_mean_std=[3, 0.5],
-            #     stero_half_block_spark_prob=0.05,
-            #     stero_half_block_value=3000,
-            # ),
+            # ---- 光学低通 ----
             "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
-            # "random_gaussian_noise": RandomGaussianNoiseCfg(noise_mean=0.0, noise_std=1, probability=0.05),
+            # ---- 时间维度 ----
+            "latency": LatencyNoiseCfg(
+                # camera update_period=0.02s → 1 step = 20ms
+                history_length=7,
+                latency_distribution="choice",
+                latency_choices=[1, 2, 3, 4],
+                latency_choices_probabilities=[0.60, 0.20, 0.10, 0.10],
+                sample_frequency=None,                   # 每 episode 一个固定延迟
+            ),
+            # ---- 归一化最后 ----
             "depth_normalization": DepthNormalizationCfg(
                 depth_range=(0.0, 2.5),
                 normalize=True,
