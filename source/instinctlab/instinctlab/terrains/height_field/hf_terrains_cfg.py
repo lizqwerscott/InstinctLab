@@ -21,6 +21,10 @@ class WallTerrainCfgMixin:
     wall_height: float = 5.0  # Height of the walls
     wall_thickness: float = 0.05  # Thickness of the walls
 
+class StairsSideWallCfgMixin:
+    side_wall_prob: List[float] = [0.0, 0.0]  # Probability of generating side walls on [left, right] sides
+    side_wall_height: float = 2.0  # Height of the side walls
+    side_wall_thickness: float = 0.05  # Thickness of the side walls
 
 @configclass
 class PerlinPlaneTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
@@ -113,7 +117,7 @@ class PerlinStairsUpDownTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
     per_step_width: float | None = None
     """The width of each step. If None, it will be equal to the width of the terrain."""
     per_step_length: tuple[float, float] | float = MISSING
-    """The length of each step along the y-axis."""
+
     num_steps: tuple[int, int] | int = MISSING
     """The number of steps. Could be a fixed value or a range (min, max)."""
 
@@ -122,6 +126,24 @@ class PerlinStairsUpDownTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
 
     perlin_cfg: PerlinPlaneTerrainCfg | None = None
 
+@configclass
+class PerlinStairsUpDownWithWallsTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin, StairsSideWallCfgMixin):
+    """Configuration for a stairs up and down parkour terrain with side walls."""
+
+    function = hf_terrains.perlin_stairs_up_down_with_walls_terrain
+    per_step_height: tuple[float, float] | float = MISSING
+    """The height of each step. Could be a fixed value or a range (min, max)."""
+    per_step_width: float | None = None
+    """The width of each step. If None, it will be equal to the width of the terrain."""
+    per_step_length: tuple[float, float] | float = MISSING
+
+    num_steps: tuple[int, int] | int = MISSING
+    """The number of steps. Could be a fixed value or a range (min, max)."""
+
+    platform_length: float = 1.0
+    """The length of the platform at the bottom of the stairs."""
+
+    perlin_cfg: PerlinPlaneTerrainCfg | None = None
 
 @configclass
 class PerlinStairsDownUpTerrainCfg(HfTerrainBaseCfg, WallTerrainCfgMixin):
