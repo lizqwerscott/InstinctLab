@@ -239,7 +239,7 @@ class SceneCfg(InteractiveSceneCfg):
         debug_vis=False,
         virtual_obstacles={
             "edges": GreedyconcatEdgeCylinderCfg(
-                cylinder_radius=0.05,
+                cylinder_radius=0.08,
                 min_points=2,
             ),
         },
@@ -590,10 +590,10 @@ class CommandsCfg:
         velocity_ranges={
             "perlin_rough": {"lin_vel_x": (0.45, 1.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
             "perlin_rough_stand": {"lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
-            "pyramid_stairs": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "pyramid_stairs_inv": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "up_down": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "down_up": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs": {"lin_vel_x": (0.3, 0.55), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs_inv": {"lin_vel_x": (0.3, 0.55), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "up_down": {"lin_vel_x": (0.3, 0.55), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "down_up": {"lin_vel_x": (0.3, 0.55), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
         },
         only_positive_lin_vel_x=True,
         lin_vel_threshold=0.0,
@@ -668,13 +668,13 @@ class G1Rewards:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-4.0)
     pelvis_orientation_l2 = RewTerm(
         func=mdp.link_orientation, weight=-3.0, params={"asset_cfg": SceneEntityCfg("robot", body_names="pelvis")}
     )
     feet_flat_ori = RewTerm(
         func=mdp.feet_orientation_contact,
-        weight=-0.4,
+        weight=-0.8,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
@@ -745,6 +745,17 @@ class G1Rewards:
             "threshold": 1.0,
         },
     )
+
+    step_safety = RewTerm(
+        func=mdp.step_safety,
+        weight=-3.0,
+        params={
+            "volume_points_cfg": SceneEntityCfg("leg_volume_points"),
+            "contact_forces_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "once": True,
+        },
+    )
+    
 
 
 @configclass
