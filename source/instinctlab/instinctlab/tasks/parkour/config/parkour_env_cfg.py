@@ -623,7 +623,7 @@ class G1Rewards:
     # Regularization rewards
     volume_points_penetration = RewTerm(
         func=mdp.volume_points_penetration,
-        weight=-4.0,
+        weight=-5.0,
         params={
             "sensor_cfg": SceneEntityCfg("leg_volume_points"),
         },
@@ -745,17 +745,6 @@ class G1Rewards:
             "threshold": 1.0,
         },
     )
-
-    step_safety = RewTerm(
-        func=mdp.step_safety,
-        weight=-3.0,
-        params={
-            "volume_points_cfg": SceneEntityCfg("leg_volume_points"),
-            "contact_forces_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "once": True,
-        },
-    )
-    
 
 
 @configclass
