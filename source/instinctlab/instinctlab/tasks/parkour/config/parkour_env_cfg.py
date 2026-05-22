@@ -262,6 +262,26 @@ class SceneCfg(InteractiveSceneCfg):
         mesh_prim_paths=["/World/ground"],
         update_period=0.02,
     )
+    left_pivot_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",
+        # 3x3 mini grid below the ankle roll pivot; detects whether the pivot is supported.
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.03, size=[0.06, 0.06]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+        update_period=0.02,
+    )
+    right_pivot_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",
+        # 3x3 mini grid below the ankle roll pivot; detects whether the pivot is supported.
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.03, size=[0.06, 0.06]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+        update_period=0.02,
+    )
     contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
     leg_volume_points = VolumePointsCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
@@ -695,18 +715,9 @@ class G1Rewards:
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
         },
     )
-    feet_contact_rotate = RewTerm(
-        func=mdp.contact_rotate,
-        weight=-0.25,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
-            "threshold": 1.0,
-        },
-    )
     feet_contact_flatness = RewTerm(
         func=mdp.feet_contact_flatness,
-        weight=-2.0,
+        weight=-1.0,
         params={
             "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
@@ -716,6 +727,23 @@ class G1Rewards:
             "flatness_threshold": 0.03,
         },
     )
+    feet_pivot_overhang = RewTerm(
+        func=mdp.feet_pivot_overhang,
+        weight=-4.0,
+        params={
+            "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
+            "right_height_scanner_cfg": SceneEntityCfg("right_height_scanner"),
+            "left_pivot_scanner_cfg": SceneEntityCfg("left_pivot_scanner"),
+            "right_pivot_scanner_cfg": SceneEntityCfg("right_pivot_scanner"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "support_tol": 0.03,
+            "overhang_clip": 0.1,
+            "settled_time": 0.08,
+            "support_topk": 3,
+        },
+    )
+    feet_edge_contact_rotate = None
     feet_close_xy = RewTerm(
         func=mdp.feet_close_xy_gauss,
         weight=0.4,

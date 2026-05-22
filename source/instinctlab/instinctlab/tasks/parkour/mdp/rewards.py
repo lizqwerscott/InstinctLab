@@ -201,6 +201,119 @@ def feet_contact_flatness(
     return reward
 
 
+def _feet_pivot_overhang(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_height_scanner_cfg: SceneEntityCfg,
+    right_height_scanner_cfg: SceneEntityCfg,
+    left_pivot_scanner_cfg: SceneEntityCfg,
+    right_pivot_scanner_cfg: SceneEntityCfg,
+    support_tol: float = 0.03,
+    overhang_clip: float = 0.1,
+    settled_time: float = 0.08,
+    support_topk: int = 3,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Return per-foot normalized ankle-pivot overhang in [0, 1].
+
+    The foot patch estimates the highest nearby support surface, while the pivot scanner
+    checks the terrain directly under the ankle roll axis. Overhang is positive only when
+    the support surface is above the pivot terrain by more than support_tol, which catches
+    heel/toe edge support without penalizing normal ankle motion on a solid step.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    net_forces = contact_sensor.data.net_forces_w_history
+    is_contact = (
+        torch.max(torch.norm(net_forces[:, :, contact_sensor_cfg.body_ids], dim=-1), dim=1)[0] > contact_threshold
+    )
+    if settled_time > 0.0:
+        contact_time = contact_sensor.data.current_contact_time[:, contact_sensor_cfg.body_ids]
+        is_contact = is_contact & (contact_time > settled_time)
+
+    overhang = torch.zeros((env.num_envs, 2), device=env.device)
+    scanner_pairs = (
+        (left_height_scanner_cfg, left_pivot_scanner_cfg),
+        (right_height_scanner_cfg, right_pivot_scanner_cfg),
+    )
+    for i, (height_scanner_cfg, pivot_scanner_cfg) in enumerate(scanner_pairs):
+        support_hits_z = env.scene[height_scanner_cfg.name].data.ray_hits_w[..., 2]
+        low_sentinel = support_hits_z.new_full((), -1.0e6)
+        support_hits_z = torch.where(torch.isfinite(support_hits_z), support_hits_z, low_sentinel)
+        topk = min(support_topk, support_hits_z.shape[-1])
+        z_support = torch.topk(support_hits_z, k=topk, dim=-1).values.mean(dim=-1)
+
+        pivot_hits_z = env.scene[pivot_scanner_cfg.name].data.ray_hits_w[..., 2]
+        missed_pivot_z = (z_support - overhang_clip - support_tol).unsqueeze(-1)
+        pivot_hits_z = torch.where(torch.isfinite(pivot_hits_z), pivot_hits_z, missed_pivot_z)
+        z_pivot = torch.mean(pivot_hits_z, dim=-1)
+
+        raw_overhang = torch.relu(z_support - z_pivot - support_tol)
+        overhang[:, i] = torch.clamp(raw_overhang, max=overhang_clip) / overhang_clip
+
+    return overhang * is_contact.float()
+
+
+def feet_pivot_overhang(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_height_scanner_cfg: SceneEntityCfg,
+    right_height_scanner_cfg: SceneEntityCfg,
+    left_pivot_scanner_cfg: SceneEntityCfg,
+    right_pivot_scanner_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    support_tol: float = 0.03,
+    overhang_clip: float = 0.1,
+    settled_time: float = 0.08,
+    support_topk: int = 3,
+) -> torch.Tensor:
+    """Penalize stance feet whose ankle-roll pivot is unsupported by the current step."""
+    del asset_cfg  # kept for config symmetry with feet_edge_contact_rotate
+    overhang = _feet_pivot_overhang(
+        env=env,
+        contact_sensor_cfg=contact_sensor_cfg,
+        left_height_scanner_cfg=left_height_scanner_cfg,
+        right_height_scanner_cfg=right_height_scanner_cfg,
+        left_pivot_scanner_cfg=left_pivot_scanner_cfg,
+        right_pivot_scanner_cfg=right_pivot_scanner_cfg,
+        support_tol=support_tol,
+        overhang_clip=overhang_clip,
+        settled_time=settled_time,
+        support_topk=support_topk,
+    )
+    return torch.sum(torch.square(overhang), dim=-1)
+
+
+def feet_edge_contact_rotate(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_height_scanner_cfg: SceneEntityCfg,
+    right_height_scanner_cfg: SceneEntityCfg,
+    left_pivot_scanner_cfg: SceneEntityCfg,
+    right_pivot_scanner_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    support_tol: float = 0.03,
+    overhang_clip: float = 0.1,
+    settled_time: float = 0.08,
+    support_topk: int = 3,
+) -> torch.Tensor:
+    """Penalize foot roll/pitch rotation only when the ankle pivot is overhanging an edge."""
+    asset = env.scene[asset_cfg.name]
+    overhang = _feet_pivot_overhang(
+        env=env,
+        contact_sensor_cfg=contact_sensor_cfg,
+        left_height_scanner_cfg=left_height_scanner_cfg,
+        right_height_scanner_cfg=right_height_scanner_cfg,
+        left_pivot_scanner_cfg=left_pivot_scanner_cfg,
+        right_pivot_scanner_cfg=right_pivot_scanner_cfg,
+        support_tol=support_tol,
+        overhang_clip=overhang_clip,
+        settled_time=settled_time,
+        support_topk=support_topk,
+    )
+    foot_ang_vel_xy = torch.norm(asset.data.body_ang_vel_w[:, asset_cfg.body_ids, :2], dim=-1)
+    return torch.sum(overhang * foot_ang_vel_xy, dim=-1)
+
+
 def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Penalize non-flat link orientation using L2 squared kernel."""
     # extract the used quantities (to enable type-hinting)
