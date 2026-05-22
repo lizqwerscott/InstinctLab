@@ -13,18 +13,15 @@ class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
     # 3-layer CNN pyramid: 8x16x16 -> 32x8x8 -> 64x4x4 -> 128x4x4.
     # strides [2,2,1] downsample to 4x4 so the flatten head stays small
     # (128*4*4=2048 vs 16384 with no downsampling) -- keeps encoder ~0.36M params.
-    # NOTE: with hidden_sizes=[], ParallelLayer appends output_size, so the head
-    # is Linear(2048 -> 128) + SiLU (not a bare linear projection). The trailing
-    # SiLU means the latent is not zero-centered -- revisit if aligning to a
-    # paper-style bare-linear head + latent LayerNorm.
     output_size = 128
-    channels = [32, 64, 128]
+    channels = [16, 32, 64]
     kernel_sizes = [3, 3, 3]
-    strides = [2, 2, 1]
-    hidden_sizes = []  # head: Linear(2048 -> 128) + SiLU (see NOTE above)
+    strides = [1, 2, 2]
+    hidden_sizes = []  
     paddings = [1, 1, 1]
     nonlinearity = "SiLU"
     use_maxpool = False
+    final_nonlinearity = False
     component_names = [
         "depth_image",
     ]
