@@ -244,18 +244,20 @@ class SceneCfg(InteractiveSceneCfg):
     # sensors
     left_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.058, 0.0, 20.0)),
         ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.12, size=[0.12, 0.0]),
+        # 5x3 ray grid over the foot footprint (~0.16m x 0.08m); feeds feet_contact_flatness
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.04, size=[0.16, 0.08]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
         update_period=0.02,
     )
     right_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.058, 0.0, 20.0)),
         ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.12, size=[0.12, 0.0]),
+        # 5x3 ray grid over the foot footprint (~0.16m x 0.08m); feeds feet_contact_flatness
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.04, size=[0.16, 0.08]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
         update_period=0.02,
@@ -702,15 +704,16 @@ class G1Rewards:
             "threshold": 1.0,
         },
     )
-    feet_at_plane = RewTerm(
-        func=mdp.feet_at_plane,
-        weight=-0.1,
+    feet_contact_flatness = RewTerm(
+        func=mdp.feet_contact_flatness,
+        weight=-2.0,
         params={
             "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
             "right_height_scanner_cfg": SceneEntityCfg("right_height_scanner"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
-            "height_offset": 0.035,
+            "height_clip": 0.08,
+            "flatness_threshold": 0.03,
         },
     )
     feet_close_xy = RewTerm(

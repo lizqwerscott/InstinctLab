@@ -163,6 +163,44 @@ def feet_at_plane(
     return torch.sum(left_reward, dim=-1) + torch.sum(right_reward, dim=-1)
 
 
+def feet_contact_flatness(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_height_scanner_cfg: SceneEntityCfg,
+    right_height_scanner_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    height_clip: float = 0.08,
+    flatness_threshold: float = 0.03,
+) -> torch.Tensor:
+    """Penalize a stance foot landing on uneven ground (stair edges / corners).
+
+    For each foot in contact, a small grid of rays under the foot footprint samples the
+    local terrain height. The std of those heights is ~0 on a flat patch and large when
+    the foot straddles a stair edge (rays split between two step levels). Heights are
+    clipped around the patch median so a single tall step (or a missed ray) cannot
+    dominate the signal. A deadband ignores ordinary roughness below flatness_threshold.
+    Calibration-free: it measures terrain, not foot/shoe geometry.
+    """
+    asset = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    net_forces = contact_sensor.data.net_forces_w_history
+    is_contact = torch.max(torch.norm(net_forces[:, :, contact_sensor_cfg.body_ids], dim=-1), dim=1)[0] > 1.0
+
+    reward = torch.zeros(env.num_envs, device=env.device)
+    for i, scanner_cfg in enumerate((left_height_scanner_cfg, right_height_scanner_cfg)):
+        scanner = env.scene[scanner_cfg.name]
+        hits_z = scanner.data.ray_hits_w[..., 2]  # (N, P)
+        # missed rays (inf) -> treat as foot level so they add no spurious penalty
+        foot_z = asset.data.body_pos_w[:, asset_cfg.body_ids[i], 2:3]
+        hits_z = torch.where(torch.isinf(hits_z), foot_z, hits_z)
+        # clip around the patch median so a tall lower step cannot dominate the std
+        center = torch.median(hits_z, dim=-1, keepdim=True).values
+        hits_z = torch.clamp(hits_z, center - height_clip, center + height_clip)
+        flatness = torch.std(hits_z, dim=-1)
+        reward = reward + torch.relu(flatness - flatness_threshold) * is_contact[:, i]
+    return reward
+
+
 def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Penalize non-flat link orientation using L2 squared kernel."""
     # extract the used quantities (to enable type-hinting)

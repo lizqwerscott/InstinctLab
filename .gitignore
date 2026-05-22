@@ -37,3 +37,4 @@ _repo
 _build
 .lastformat
 .vscode/
+.claude/
