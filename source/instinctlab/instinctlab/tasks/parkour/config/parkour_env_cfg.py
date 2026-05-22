@@ -56,10 +56,10 @@ VELOCITY_RANGE = {
 ##
 ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     seed=0,
-    size=(8.0, 8.0),
+    size=(12.0, 12.0),
     border_width=3,
-    num_rows=10,
-    num_cols=20,
+    num_rows=5,
+    num_cols=10,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=1.0,
@@ -79,7 +79,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             wall_thickness=0.05,
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
+                    num_patches=120, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
                 ),
             },
         ),
@@ -96,7 +96,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             wall_thickness=0.05,
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
+                    num_patches=120, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
                 ),
             },
         ),
@@ -119,11 +119,11 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(-0.7, 0.7),
+                    x_range=(5.7, 5.7),
+                    y_range=(-0.0, 0.0),
                 ),
             },
         ),
@@ -146,11 +146,11 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(-0.7, 0.7),
+                    x_range=(5.7, 5.7),
+                    y_range=(-0.0, 0.0),
                 ),
             },
         ),
@@ -173,11 +173,11 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(-0.7, 0.7),
+                    x_range=(5.7, 5.7),
+                    y_range=(-0.0, 0.0),
                 ),
             },
         ),
@@ -200,11 +200,11 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(-0.7, 0.7),
+                    x_range=(5.7, 5.7),
+                    y_range=(-0.0, 0.0),
                 ),
             },
         )
@@ -264,9 +264,9 @@ class SceneCfg(InteractiveSceneCfg):
     leg_volume_points = VolumePointsCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
         points_generator=Grid3dPointsGeneratorCfg(
-            x_min=-0.045,
+            x_min=-0.025,
             x_max=0.14,
-            x_num=14,
+            x_num=12,
             y_min=-0.04,
             y_max=0.04,
             y_num=7,
@@ -339,14 +339,14 @@ class SceneCfg(InteractiveSceneCfg):
             # ---- 光学低通 ----
             "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
             # ---- 时间维度 ----
-            "latency": LatencyNoiseCfg(
-                # camera update_period=0.02s → 1 step = 20ms
-                history_length=7,
-                latency_distribution="choice",
-                latency_choices=[1, 2, 3, 4],
-                latency_choices_probabilities=[0.60, 0.20, 0.10, 0.10],
-                sample_frequency=None,                   # 每 episode 一个固定延迟
-            ),
+            # "latency": LatencyNoiseCfg(
+            #     # camera update_period=0.02s → 1 step = 20ms
+            #     history_length=7,
+            #     latency_distribution="choice",
+            #     latency_choices=[1, 2, 3, 4],
+            #     latency_choices_probabilities=[0.60, 0.20, 0.10, 0.10],
+            #     sample_frequency=None,                   # 每 episode 一个固定延迟
+            # ),
             # ---- 归一化最后 ----
             "depth_normalization": DepthNormalizationCfg(
                 depth_range=(0.0, 2.5),
@@ -600,10 +600,10 @@ class CommandsCfg:
         velocity_ranges={
             "perlin_rough": {"lin_vel_x": (0.45, 1.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
             "perlin_rough_stand": {"lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
-            "pyramid_stairs": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "pyramid_stairs_tiny": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "pyramid_stairs_inv": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "pyramid_stairs_inv_tiny": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs": {"lin_vel_x": (0.3, 0.6), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs_tiny": {"lin_vel_x": (0.3, 0.6), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs_inv": {"lin_vel_x": (0.3, 0.6), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs_inv_tiny": {"lin_vel_x": (0.3, 0.6), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
         },
         only_positive_lin_vel_x=True,
         lin_vel_threshold=0.0,
@@ -661,7 +661,7 @@ class G1Rewards:
         weight=-0.5,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_yaw_joint", ".*_hip_roll_joint"])},
     )
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.1)
     dof_torques_l2 = RewTerm(
         func=mdp.joint_torques_l2,
         weight=-1.5e-7,
@@ -678,16 +678,28 @@ class G1Rewards:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-4.0)
     pelvis_orientation_l2 = RewTerm(
-        func=mdp.link_orientation, weight=-3.0, params={"asset_cfg": SceneEntityCfg("robot", body_names="pelvis")}
+        func=mdp.link_orientation, weight=-4.0, params={"asset_cfg": SceneEntityCfg("robot", body_names="pelvis")}
+    )
+    torso_orientation_l2 = RewTerm(
+        func=mdp.link_orientation, weight=-2.0, params={"asset_cfg": SceneEntityCfg("robot", body_names="torso_link")}
     )
     feet_flat_ori = RewTerm(
         func=mdp.feet_orientation_contact,
-        weight=-0.4,
+        weight=-1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+        },
+    )
+    feet_contact_rotate = RewTerm(
+        func=mdp.contact_rotate,
+        weight=-0.25,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "threshold": 1.0,
         },
     )
     feet_at_plane = RewTerm(
@@ -705,7 +717,7 @@ class G1Rewards:
         func=mdp.feet_close_xy_gauss,
         weight=0.4,
         params={
-            "threshold": 0.12,
+            "threshold": 0.14,
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "std": math.sqrt(0.05),
         },
@@ -792,6 +804,15 @@ class TerminationsCfg:
 class EventCfg:
     """Configuration for events."""
 
+    # Hand the scene (terrain layout) to MotionReferenceManager so motion buffers can
+    # match against it. Harmless for plain AmassMotion (base match_scene is a no-op);
+    # required by TerrainAwareAmassMotion to cache each env's subterrain.
+    match_motion_reference = EventTerm(
+        func=instinct_mdp.match_motion_ref_with_scene,
+        mode="startup",
+        params={"motion_ref_cfg": SceneEntityCfg("motion_reference")},
+    )
+
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
@@ -819,7 +840,7 @@ class EventCfg:
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.7, 0.7), "y": (-0.7, 0.7), "yaw": (-0.78, 0.78)},
+            "pose_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "yaw": (-0.1, 0.1)},
             "velocity_range": {
                 "x": (-0.2, 0.2),
                 "y": (-0.2, 0.2),
@@ -919,7 +940,7 @@ class ParkourEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
-        self.sim.physx.gpu_collision_stack_size = 2**29
+        self.sim.physx.gpu_collision_stack_size = 2**30
         # update sensor update periods
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt

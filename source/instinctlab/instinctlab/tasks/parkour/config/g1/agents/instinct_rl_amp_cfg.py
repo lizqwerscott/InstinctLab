@@ -10,14 +10,21 @@ from instinctlab.utils.wrappers.instinct_rl import (
 
 @configclass
 class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
+    # 3-layer CNN pyramid: 8x16x16 -> 32x8x8 -> 64x4x4 -> 128x4x4.
+    # strides [2,2,1] downsample to 4x4 so the flatten head stays small
+    # (128*4*4=2048 vs 16384 with no downsampling) -- keeps encoder ~0.36M params.
+    # NOTE: with hidden_sizes=[], ParallelLayer appends output_size, so the head
+    # is Linear(2048 -> 128) + SiLU (not a bare linear projection). The trailing
+    # SiLU means the latent is not zero-centered -- revisit if aligning to a
+    # paper-style bare-linear head + latent LayerNorm.
     output_size = 128
-    channels = [4]
-    kernel_sizes = [3]
-    strides = [1]
-    hidden_sizes = [256, 256]
-    paddings = [1]
-    nonlinearity = "ReLU"
-    use_maxpool = True
+    channels = [32, 64, 128]
+    kernel_sizes = [3, 3, 3]
+    strides = [2, 2, 1]
+    hidden_sizes = []  # head: Linear(2048 -> 128) + SiLU (see NOTE above)
+    paddings = [1, 1, 1]
+    nonlinearity = "SiLU"
+    use_maxpool = False
     component_names = [
         "depth_image",
     ]
@@ -62,7 +69,8 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
     use_clipped_value_loss = True
     clip_param = 0.2
     entropy_coef = 0.006
-    denoise_loss_coef = 0.1
+    denoise_loss_coef = 1e-2
+    feature_kl_loss_coef = 1e-3
     num_learning_epochs = 5
     num_mini_batches = 4
     learning_rate = 1.0e-3
@@ -77,7 +85,7 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
 class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 30000
-    save_interval = 5000
+    save_interval = 2000
     experiment_name = "g1_parkour"
     resume = False
     load_run = ""
