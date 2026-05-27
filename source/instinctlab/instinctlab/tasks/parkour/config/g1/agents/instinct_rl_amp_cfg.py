@@ -4,6 +4,7 @@ from instinctlab.utils.wrappers.instinct_rl import (
     InstinctRlConv2dHeadCfg,
     InstinctRlMlpCfg,
     InstinctRlEncoderMoEActorCriticCfg,
+    InstinctRlEncoderActorCriticRecurrentCfg,
     InstinctRlOnPolicyRunnerCfg,
     InstinctRlPpoAlgorithmCfg,
 )
@@ -39,15 +40,19 @@ class EncoderConfigs:
 
 
 @configclass
-class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
+class RnnPolicyCfg(InstinctRlEncoderActorCriticRecurrentCfg):
     init_noise_std = 1.0
-    num_moe_experts = 4
-    actor_hidden_dims = [256, 128, 64]
-    critic_hidden_dims = [256, 128, 64]
-    activation = "elu"
+
+    rnn_type = "gru"
+    rnn_hidden_size = 256
+    rnn_num_layers = 1
+
+    actor_hidden_dims = [512, 256, 128]
+    critic_hidden_dims = [512, 256, 128]
+    activation = "SiLU"
+
     encoder_configs = EncoderConfigs()
     critic_encoder_configs = EncoderConfigs()
-
 
 @configclass
 class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
@@ -92,5 +97,5 @@ class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     resume = False
     load_run = ""
     empirical_normalization = False
-    policy = MoEPolicyCfg()
+    policy = RnnPolicyCfg()
     algorithm = AmpAlgoCfg()
