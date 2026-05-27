@@ -225,3 +225,28 @@ class delayed_visualizable_image(ManagerTermBase):
                 scale_up_vis,
             )
         return delayed_frames  # still delayed_frames[:, -1] shall be the latest frame.
+
+
+def height_scan_feat(
+    env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("height_scanner_critic"), offset: float = 0.5
+) -> torch.Tensor:
+    """Height scan feature from a ray caster sensor, encoded using a pre-trained VAE encoder.
+
+    Args:
+        env: The environment object.
+        sensor_cfg: The configuration of the height scanner sensor.
+        offset: Offset to subtract from the height values. Defaults to 0.5.
+
+    Returns:
+        The encoded height scan features of shape (num_envs, 3136).
+    """
+    # Get height scanner data
+    height_scanner = env.scene.sensors[sensor_cfg.name]
+
+    # Compute height scan: sensor_height - hit_z - offset
+    scan_data = height_scanner.data.pos_w[:, 2].unsqueeze(1) - height_scanner.data.ray_hits_w[..., 2] - offset
+
+    # Clamp the height scan data to the range [-5, 5]
+    scan_data = torch.clamp(scan_data, min=-5.0, max=5.0)
+
+    return scan_data

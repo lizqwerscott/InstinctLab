@@ -2,6 +2,7 @@ from isaaclab.utils import configclass
 
 from instinctlab.utils.wrappers.instinct_rl import (
     InstinctRlConv2dHeadCfg,
+    InstinctRlMlpCfg,
     InstinctRlEncoderMoEActorCriticCfg,
     InstinctRlOnPolicyRunnerCfg,
     InstinctRlPpoAlgorithmCfg,
@@ -24,8 +25,17 @@ class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
 
 
 @configclass
+class HeightScanEncoderMlpCfg(InstinctRlMlpCfg):
+    output_size = 128
+    hidden_sizes = [512, 256]
+    nonlinearity = "SiLU"
+    component_names = [
+        "height_scan",
+    ]
+
+@configclass
 class EncoderConfigs:
-    depth_encoder = DepthEncoderConv2dCfg()
+    height_scan_encoder = HeightScanEncoderMlpCfg()
 
 
 @configclass

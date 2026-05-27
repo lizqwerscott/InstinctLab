@@ -348,6 +348,15 @@ class SceneCfg(InteractiveSceneCfg):
         },
         data_histories={"distance_to_image_plane_noised": 37, "distance_to_image_plane_handled": 37},
     )
+    heightmap_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        # attach_yaw_only=True,
+        ray_alignment='yaw',
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[1.6, 1.0]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+    )
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -399,16 +408,9 @@ class ObservationsCfg:
             flatten_history_dim=True,
         )
         last_action = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
-        depth_image = ObsTerm(
-            func=mdp.delayed_visualizable_image,
-            params={
-                "data_type": "distance_to_image_plane_noised_history",
-                "sensor_cfg": SceneEntityCfg("camera"),
-                "history_skip_frames": 5,
-                "num_output_frames": 8,
-                "delayed_frame_ranges": (0, 1),
-                "debug_vis": False,
-            },
+        height_scan = ObsTerm(
+            func=mdp.height_scan_feat,
+            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
             noise=None,
         )
 
@@ -439,16 +441,9 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=8, flatten_history_dim=True)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, history_length=8, flatten_history_dim=True)
         actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
-        depth_image = ObsTerm(
-            func=mdp.delayed_visualizable_image,
-            params={
-                "data_type": "distance_to_image_plane_handled_history",
-                "sensor_cfg": SceneEntityCfg("camera"),
-                "history_skip_frames": 5,
-                "num_output_frames": 8,
-                "delayed_frame_ranges": (0, 1),
-                "debug_vis": False,
-            },
+        height_scan = ObsTerm(
+            func=mdp.height_scan_feat,
+            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
             noise=None,
         )
 
