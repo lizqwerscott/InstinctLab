@@ -33,7 +33,7 @@ G1_with_shoe_CFG.spawn.asset_path = os.path.abspath(
 class AmassMotionCfg(AmassMotionCfgBase):
     path = os.path.expanduser("~/Datasets")
     retargetting_func = None
-    filtered_motion_selection_filepath = os.path.expanduser("~/Datasets/parkour_motion_without_run_new.yaml")
+    filtered_motion_selection_filepath = os.path.expanduser("~/Datasets/parkour_motion_without_run.yaml")
     motion_start_from_middle_range = [0.0, 0.9]
     motion_start_height_offset = 0.0
     ensure_link_below_zero_ground = False
