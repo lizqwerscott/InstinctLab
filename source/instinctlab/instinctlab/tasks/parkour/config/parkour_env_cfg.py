@@ -350,7 +350,7 @@ class SceneCfg(InteractiveSceneCfg):
     )
     heightmap_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.6, 0.0, 20.0)),
         # attach_yaw_only=True,
         ray_alignment='yaw',
         pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[1.6, 1.0]),
