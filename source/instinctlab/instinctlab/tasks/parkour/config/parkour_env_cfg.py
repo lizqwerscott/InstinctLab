@@ -380,25 +380,25 @@ class ObservationsCfg:
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
             noise=Unoise(n_min=-0.2, n_max=0.2),
-            history_length=4,
+            history_length=8,
             flatten_history_dim=True,
             scale=0.25,
         )
         projected_gravity = ObsTerm(
             func=mdp.projected_gravity,
             noise=Unoise(n_min=-0.05, n_max=0.05),
-            history_length=4,
+            history_length=8,
             flatten_history_dim=True,
         )
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
-            history_length=4,
+            history_length=8,
             flatten_history_dim=True,
             params={"command_name": "base_velocity"},
             noise=None,
         )
         joint_pos_rel = ObsTerm(
-            func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01), history_length=4, flatten_history_dim=True
+            func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01), history_length=8, flatten_history_dim=True
         )
         joint_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
@@ -424,24 +424,24 @@ class ObservationsCfg:
         """Observations for critic group."""
 
         # observation terms (order preserved)
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=4, flatten_history_dim=True)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=8, flatten_history_dim=True)
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
-            history_length=4,
+            history_length=8,
             flatten_history_dim=True,
             scale=0.25,
         )
-        projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=4, flatten_history_dim=True)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=8, flatten_history_dim=True)
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
-            history_length=4,
+            history_length=8,
             flatten_history_dim=True,
             params={"command_name": "base_velocity"},
             noise=None,
         )
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=4, flatten_history_dim=True)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, history_length=4, flatten_history_dim=True)
-        actions = ObsTerm(func=mdp.last_action, history_length=4, flatten_history_dim=True)
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=8, flatten_history_dim=True)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, history_length=8, flatten_history_dim=True)
+        actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
         height_scan = ObsTerm(
             func=mdp.height_scan_feat,
             params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
