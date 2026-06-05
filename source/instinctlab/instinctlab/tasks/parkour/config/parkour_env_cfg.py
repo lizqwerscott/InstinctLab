@@ -259,6 +259,26 @@ class SceneCfg(InteractiveSceneCfg):
         mesh_prim_paths=["/World/ground"],
         update_period=0.02,
     )
+    left_height_flatness_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",
+        # 5x3 ray grid over the foot footprint (~0.16m x 0.08m); feeds feet_contact_flatness
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.04, size=[0.20, 0.08]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+        update_period=0.02,
+    )
+    right_height_flatness_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0, 0.0, 20.0)),
+        ray_alignment="yaw",
+        # 5x3 ray grid over the foot footprint (~0.16m x 0.08m); feeds feet_contact_flatness
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.04, size=[0.20, 0.08]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+        update_period=0.02,
+    )
     contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
     leg_volume_points = VolumePointsCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
@@ -679,7 +699,20 @@ class G1Rewards:
             "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
             "right_height_scanner_cfg": SceneEntityCfg("right_height_scanner"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
-            "height_offset": 0.035,
+        },
+    )
+
+    feet_contact_flatness = RewTerm(
+        func=mdp.feet_contact_flatness,
+        weight=-0.1,
+        params={
+            "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "left_height_scanner_cfg": SceneEntityCfg("left_height_flatness_scanner"),
+            "right_height_scanner_cfg": SceneEntityCfg("right_height_flatness_scanner"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "height_clip": 0.3,
+            "flatness_threshold": 0.03,
+            "terrain_names": ["pyramid_stairs", "pyramid_stairs_tiny", "pyramid_stairs_inv", "pyramid_stairs_inv_tiny"],
         },
     )
     feet_close_xy = RewTerm(

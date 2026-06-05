@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+    from instinctlab.terrains import TerrainImporter
 
 
 def feet_air_time(env, command_name: str, vel_threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -161,6 +163,79 @@ def feet_at_plane(
         * is_contact[:, 1:2]
     )
     return torch.sum(left_reward, dim=-1) + torch.sum(right_reward, dim=-1)
+
+
+def feet_contact_flatness(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_height_scanner_cfg: SceneEntityCfg,
+    right_height_scanner_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    height_clip: float = 0.15,
+    flatness_threshold: float = 0.03,
+    terrain_names: list[str] | None = None,
+) -> torch.Tensor:
+    """Penalize a stance foot landing on uneven ground (stair edges / corners).
+
+    For each foot in contact, a small grid of rays under the foot footprint samples the
+    local terrain height. The std of those heights is ~0 on a flat patch and large when
+    the foot straddles a stair edge (rays split between two step levels). Heights are
+    clipped around the patch median so a single tall step (or a missed ray) cannot
+    dominate the signal. A deadband ignores ordinary roughness below flatness_threshold.
+    Calibration-free: it measures terrain, not foot/shoe geometry.
+
+    If ``terrain_names`` is provided, the penalty is only applied to environments whose
+    sub-terrain (column) name matches one of the given names. The column-to-name mapping
+    is computed once and cached for performance.
+    """
+    asset = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    net_forces = contact_sensor.data.net_forces_w_history
+    is_contact = torch.max(torch.norm(net_forces[:, :, contact_sensor_cfg.body_ids], dim=-1), dim=1)[0] > 1.0
+
+    reward = torch.zeros(env.num_envs, device=env.device)
+
+    # --- terrain mask: only penalise on the specified sub-terrains ---
+    if terrain_names is not None:
+        cache: dict = feet_contact_flatness.__dict__.setdefault("_terrain_mask_cache", {})
+        key = tuple(sorted(terrain_names))
+        cached = cache.get(key)
+        if cached is None or cached.shape[0] != env.num_envs:
+            terrain: TerrainImporter = env.scene["terrain"]
+            cfg = terrain.cfg.terrain_generator
+            sub_terrains_names = list(cfg.sub_terrains.keys())
+            proportions = np.array([cfg.sub_terrains[n].proportion for n in sub_terrains_names], dtype=np.float64)
+            proportions /= np.sum(proportions)
+
+            # map each terrain column -> sub-terrain index (same logic as PoseVelocityCommand)
+            sub_indices = np.empty(cfg.num_cols, dtype=np.int32)
+            cumsum = np.cumsum(proportions)
+            for col in range(cfg.num_cols):
+                sub_indices[col] = int(np.min(np.where(col / cfg.num_cols + 0.001 < cumsum)[0]))
+
+            mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            for name in terrain_names:
+                if name not in sub_terrains_names:
+                    continue
+                type_idx = sub_terrains_names.index(name)
+                for col_idx in np.where(sub_indices == type_idx)[0]:
+                    env_ids = torch.where(terrain.terrain_types == col_idx)[0]
+                    mask[env_ids] = True
+            cache[key] = mask
+        reward = reward * cache[key]
+
+    for i, scanner_cfg in enumerate((left_height_scanner_cfg, right_height_scanner_cfg)):
+        scanner = env.scene[scanner_cfg.name]
+        hits_z = scanner.data.ray_hits_w[..., 2]  # (N, P)
+        # missed rays (inf) -> treat as foot level so they add no spurious penalty
+        foot_z = asset.data.body_pos_w[:, asset_cfg.body_ids[i], 2:3]
+        hits_z = torch.where(torch.isinf(hits_z), foot_z, hits_z)
+        # clip around the patch median so a tall lower step cannot dominate the std
+        center = torch.median(hits_z, dim=-1, keepdim=True).values
+        hits_z = torch.clamp(hits_z, center - height_clip, center + height_clip)
+        flatness = torch.std(hits_z, dim=-1)
+        reward = reward + torch.relu(flatness - flatness_threshold) * is_contact[:, i]
+    return reward
 
 
 def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
