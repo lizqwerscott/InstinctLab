@@ -39,13 +39,18 @@ class EncoderConfigs:
 
 
 @configclass
+class EncoderDepthConfigs:
+    height_scan_encoder = DepthEncoderConv2dCfg()
+
+
+@configclass
 class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
     init_noise_std = 1.0
     num_moe_experts = 4
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
     activation = "elu"
-    encoder_configs = EncoderConfigs()
+    encoder_configs = EncoderDepthConfigs()
     critic_encoder_configs = EncoderConfigs()
 
 
