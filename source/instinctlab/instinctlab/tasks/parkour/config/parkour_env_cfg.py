@@ -408,10 +408,16 @@ class ObservationsCfg:
             flatten_history_dim=True,
         )
         last_action = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
-        height_scan = ObsTerm(
-            func=mdp.height_scan_feat,
-            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
-            history_length=4,
+        depth_image = ObsTerm(
+            func=mdp.delayed_visualizable_image,
+            params={
+                "data_type": "distance_to_image_plane_noised_history",
+                "sensor_cfg": SceneEntityCfg("camera"),
+                "history_skip_frames": 5,
+                "num_output_frames": 8,
+                "delayed_frame_ranges": (0, 1),
+                "debug_vis": False,
+            },
             noise=None,
         )
 
