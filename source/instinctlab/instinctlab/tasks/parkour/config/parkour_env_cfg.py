@@ -557,6 +557,206 @@ class ObservationsCfg:
 
 
 @configclass
+class StudentObservationsCfg:
+    """Observation specifications for the MDP."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Observations for policy group."""
+
+        # observation terms (order preserved)
+        base_ang_vel = ObsTerm(
+            func=mdp.base_ang_vel,
+            noise=Unoise(n_min=-0.2, n_max=0.2),
+            history_length=8,
+            flatten_history_dim=True,
+            scale=0.25,
+        )
+        projected_gravity = ObsTerm(
+            func=mdp.projected_gravity,
+            noise=Unoise(n_min=-0.05, n_max=0.05),
+            history_length=8,
+            flatten_history_dim=True,
+        )
+        velocity_commands = ObsTerm(
+            func=mdp.generated_commands,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"command_name": "base_velocity"},
+            noise=None,
+        )
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01), history_length=8, flatten_history_dim=True
+        )
+        joint_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            noise=Unoise(n_min=-0.5, n_max=0.5),
+            scale=0.05,
+            history_length=8,
+            flatten_history_dim=True,
+        )
+        last_action = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
+        depth_image = ObsTerm(
+            func=mdp.delayed_visualizable_image,
+            params={
+                "data_type": "distance_to_image_plane_noised_history",
+                "sensor_cfg": SceneEntityCfg("camera"),
+                "history_skip_frames": 5,
+                "num_output_frames": 8,
+                "delayed_frame_ranges": (0, 1),
+                "debug_vis": False,
+            },
+            noise=None,
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = True
+            self.concatenate_terms = False
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        """Observations for critic group."""
+
+        # observation terms (order preserved)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=8, flatten_history_dim=True)
+        base_ang_vel = ObsTerm(
+            func=mdp.base_ang_vel,
+            history_length=8,
+            flatten_history_dim=True,
+            scale=0.25,
+        )
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=8, flatten_history_dim=True)
+        velocity_commands = ObsTerm(
+            func=mdp.generated_commands,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"command_name": "base_velocity"},
+            noise=None,
+        )
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=8, flatten_history_dim=True)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, history_length=8, flatten_history_dim=True)
+        actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
+        depth_image = ObsTerm(
+            func=mdp.delayed_visualizable_image,
+            params={
+                "data_type": "distance_to_image_plane_noised_history",
+                "sensor_cfg": SceneEntityCfg("camera"),
+                "history_skip_frames": 5,
+                "num_output_frames": 8,
+                "delayed_frame_ranges": (0, 1),
+                "debug_vis": False,
+            },
+            noise=None,
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = False
+
+    @configclass
+    class AmpPolicyStateObsCfg(ObsGroup):
+        concatenate_terms = False
+        projected_gravity = ObsTerm(
+            func=mdp.projected_gravity,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+            history_length=10,
+        )
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    name="robot",
+                    preserve_order=True,
+                ),
+            },
+        )
+        joint_vel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            scale=0.05,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    name="robot",
+                    preserve_order=True,
+                ),
+            },
+        )
+        base_lin_vel = ObsTerm(
+            func=mdp.base_lin_vel,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        base_ang_vel = ObsTerm(
+            func=mdp.base_ang_vel,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+    @configclass
+    class AmpReferenceStateObsCfg(ObsGroup):
+        concatenate_terms = False
+        projected_gravity = ObsTerm(
+            func=mdp.projected_gravity_reference_as_state,
+            params={
+                "asset_cfg": SceneEntityCfg(name="motion_reference"),
+            },
+            history_length=10,
+        )
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel_reference_as_state,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg(name="motion_reference"),
+            },
+        )
+        joint_vel = ObsTerm(
+            func=mdp.joint_vel_rel_reference_as_state,
+            scale=0.05,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg(name="motion_reference"),
+            },
+        )
+        base_lin_vel = ObsTerm(
+            func=mdp.base_lin_vel_reference_as_state,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg(name="motion_reference"),
+            },
+        )
+        base_ang_vel = ObsTerm(
+            func=mdp.base_ang_vel_reference_as_state,
+            history_length=10,
+            flatten_history_dim=True,
+            params={
+                "asset_cfg": SceneEntityCfg(name="motion_reference"),
+            },
+        )
+
+    # observation group
+    policy: PolicyCfg = PolicyCfg()
+    # critic group
+    critic: CriticCfg = CriticCfg()
+    # AMP training groups
+    amp_policy: AmpPolicyStateObsCfg = AmpPolicyStateObsCfg()
+    amp_reference: AmpReferenceStateObsCfg = AmpReferenceStateObsCfg()
+
+
+@configclass
 class ActionsCfg:
     """Action specifications for the MDP."""
 
@@ -880,7 +1080,7 @@ class ParkourEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
     scene: SceneCfg = SceneCfg(num_envs=4096, env_spacing=2.5)
     # Basic settings
-    observations: ObservationsCfg = ObservationsCfg()
+    observations = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
     # MDP settings
@@ -904,3 +1104,10 @@ class ParkourEnvCfg(ManagerBasedRLEnvCfg):
         # update sensor update periods
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
+
+
+@configclass
+class ParkourStudentEnvCfg(ParkourEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.observations = StudentObservationsCfg()

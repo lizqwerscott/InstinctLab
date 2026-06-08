@@ -17,7 +17,7 @@ from instinctlab.motion_reference import MotionReferenceManagerCfg
 from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMotionCfg as AmassMotionCfgBase
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
 from instinctlab.sensors import get_link_prim_targets
-from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ParkourEnvCfg
+from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ParkourEnvCfg, ParkourStudentEnvCfg
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 G1_CFG = copy.deepcopy(G1_29DOF_TORSOBASE_POPSICLE_CFG)
@@ -92,6 +92,18 @@ class G1ParkourRoughEnvCfg(ParkourEnvCfg):
         self.scene.camera.mesh_prim_paths.extend(get_link_prim_targets(G1_29DOF_LINKS))
         self.scene.motion_reference = motion_reference_cfg
 
+@configclass
+class G1ParkourStudentRoughEnvCfg(ParkourStudentEnvCfg):
+    def __post_init__(self):
+        # post init of parent
+        super().__post_init__()
+        # Scene
+        self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG
+        self.scene.robot = G1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.actuators = beyondmimic_g1_29dof_delayed_actuators
+        self.scene.camera.mesh_prim_paths.extend(get_link_prim_targets(G1_29DOF_LINKS))
+        self.scene.motion_reference = motion_reference_cfg
+
 
 class ShoeConfigMixin:
     def apply_shoe_config(self):
@@ -133,6 +145,37 @@ class G1ParkourRoughEnvCfg_PLAY(G1ParkourRoughEnvCfg):
             "velocity_range": (0.0, 0.0),
         }
 
+@configclass
+class G1ParkourStudentRoughEnvCfg_PLAY(G1ParkourStudentRoughEnvCfg):
+    def __post_init__(self):
+        # post init of parent
+        super().__post_init__()
+        self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG_PLAY
+        # make a smaller scene for play
+        self.scene.num_envs = 1
+        # self.viewer = ViewerCfg(
+        #     eye=[4.0, 0.75, 1.0],
+        #     lookat=[0.0, 0.75, 0.0],
+        #     origin_type="asset_root",
+        #     asset_name="robot",
+        # )
+
+        self.scene.env_spacing = 2.5
+        self.episode_length_s = 10
+        self.terminations.root_height = None
+        # spawn the robot randomly in the grid (instead of their terrain levels)
+        # reduce the number of terrains to save memory
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 4
+            self.scene.terrain.terrain_generator.num_cols = 10
+
+        self.scene.leg_volume_points.debug_vis = True
+        self.commands.base_velocity.debug_vis = True
+        self.events.physics_material = None
+        self.events.reset_robot_joints.params = {
+            "position_range": (0.0, 0.0),
+            "velocity_range": (0.0, 0.0),
+        }
 
 @configclass
 class G1ParkourEnvCfg(G1ParkourRoughEnvCfg, ShoeConfigMixin):
@@ -143,6 +186,20 @@ class G1ParkourEnvCfg(G1ParkourRoughEnvCfg, ShoeConfigMixin):
 
 @configclass
 class G1ParkourEnvCfg_PLAY(G1ParkourRoughEnvCfg_PLAY, ShoeConfigMixin):
+    def __post_init__(self):
+        super().__post_init__()
+        self.apply_shoe_config()
+
+
+@configclass
+class G1ParkourStudentEnvCfg(G1ParkourStudentRoughEnvCfg, ShoeConfigMixin):
+    def __post_init__(self):
+        super().__post_init__()
+        self.apply_shoe_config()
+
+
+@configclass
+class G1ParkourStudentEnvCfg_PLAY(G1ParkourStudentRoughEnvCfg_PLAY, ShoeConfigMixin):
     def __post_init__(self):
         super().__post_init__()
         self.apply_shoe_config()
