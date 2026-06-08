@@ -224,3 +224,15 @@ class G1ParkourStudentPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     empirical_normalization = False
     policy = MoEStudentPolicyCfg()
     algorithm = AmpAlgoStudentCfg()
+
+@configclass
+class G1ParkourStudentFinetunePPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
+    num_steps_per_env = 24
+    max_iterations = 30000
+    save_interval = 5000
+    experiment_name = "g1_parkour_student_finetune"
+    resume = False
+    load_run = ""
+    empirical_normalization = False
+    policy = MoEStudentPolicyCfg()
+    algorithm = AmpAlgoCfg()
