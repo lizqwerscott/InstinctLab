@@ -146,7 +146,7 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
                 "joint_pos_rel": (232,),
                 "joint_vel_rel": (232,),
                 "last_action": (232,),
-                "height_scan": (4 * 21 * 33),
+                "height_scan": (4 * 21 * 33,),
             },
             "critic": {
                 "base_ang_vel": (24,),
@@ -155,9 +155,10 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
                 "joint_pos_rel": (232,),
                 "joint_vel_rel": (232,),
                 "last_action": (232,),
-                "height_scan": (4 * 21 * 33),
+                "height_scan": (4 * 21 * 33,),
             },
         },
+        "num_moe_experts": 4,
         "num_actions": 29,
         "num_rewards": 1,
     }
