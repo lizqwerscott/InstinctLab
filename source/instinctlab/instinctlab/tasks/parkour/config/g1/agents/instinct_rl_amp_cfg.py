@@ -62,7 +62,7 @@ class MoEStudentPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
     critic_hidden_dims = [256, 128, 64]
     activation = "elu"
     encoder_configs = EncoderDepthConfigs()
-    critic_encoder_configs = EncoderDepthConfigs()
+    critic_encoder_configs = EncoderConfigs()
 
 
 @configclass
@@ -101,15 +101,31 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
 
 @configclass
 class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
-    class_name = "VaeDistill"
+    class_name = "TPPO"
 
-    kl_loss_func = "kl_divergence"
-    kl_loss_coef = 1.0
+    # using_ppo=False => pure distillation (DAgger): only the teacher-action imitation loss
+    # is optimized, no PPO/GAE/value/discriminator terms.
     using_ppo = False
+
+    # Behavior-cloning loss form: squared L2  ||mu_student - mu_teacher||^2  (paper eq. 8).
+    # TPPO default "real" is the (non-squared) L2 norm; "mse_sum" = sum of squared diffs.
+    distill_target = "mse_sum"
 
     num_learning_epochs = 5
     num_mini_batches = 4
     learning_rate = 1e-3
+
+    # One-Cycle LR schedule (paper Table XII): initial lr 1e-3, div_factor=10 (peak/init)
+    # => max_lr=1e-2, final_div_factor=50 (final/init). TPPO steps the scheduler once per
+    # update() (i.e. once per learning iteration), so total_steps MUST match the runner's
+    # max_iterations (G1ParkourStudentPPORunnerCfg.max_iterations) to avoid over-stepping.
+    lr_scheduler_class_name = "OneCycleLR"
+    lr_scheduler: dict = {
+        "max_lr": 1.0e-2,
+        "total_steps": 30000,
+        "div_factor": 10.0,
+        "final_div_factor": 50.0,
+    }
 
     teacher_policy_class_name = MoEPolicyCfg().class_name
 
@@ -168,36 +184,6 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
         "~/Data/instinctlab_logs/instinct_rl/g1_perceptive_shadowing/20260111_103654_g1Perceptive_4MotionsKneelClimbStep1_concatMotionBins__GPU0_from20260108_032900"
     )
 
-    # source ppo
-
-    discriminator_kwargs = {
-        "hidden_sizes": [1024, 512],
-        "nonlinearity": "ReLU",
-    }
-
-    discriminator_reward_coef = 0.25
-    discriminator_reward_type = "quad"
-    discriminator_loss_func = "MSELoss"
-    discriminator_gradient_penalty_coef = 5.0
-    discriminator_optimizer_class_name = "AdamW"
-    discriminator_weight_decay_coef = 3e-4
-    discriminator_logit_weight_decay_coef = 0.04
-    discriminator_optimizer_kwargs = {
-        "lr": 1.0e-4,
-        "betas": [0.9, 0.999],
-    }
-    value_loss_coef = 1.0
-    use_clipped_value_loss = True
-    clip_param = 0.2
-    entropy_coef = 0.006
-    denoise_loss_coef = 0.1
-    num_learning_epochs = 5
-    num_mini_batches = 4
-    learning_rate = 1.0e-3
-    schedule = "adaptive"
-    gamma = 0.99
-    lam = 0.95
-    desired_kl = 0.01
     max_grad_norm = 1.0
 
 
