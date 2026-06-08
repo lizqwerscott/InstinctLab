@@ -261,7 +261,7 @@ class SceneCfg(InteractiveSceneCfg):
     )
     left_height_flatness_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
         ray_alignment="yaw",
         # 5x3 ray grid over the foot footprint (~0.16m x 0.08m); feeds feet_contact_flatness
         pattern_cfg=patterns.GridPatternCfg(resolution=0.04, size=[0.20, 0.08]),
@@ -271,7 +271,7 @@ class SceneCfg(InteractiveSceneCfg):
     )
     right_height_flatness_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
         ray_alignment="yaw",
         # 5x3 ray grid over the foot footprint (~0.16m x 0.08m); feeds feet_contact_flatness
         pattern_cfg=patterns.GridPatternCfg(resolution=0.04, size=[0.20, 0.08]),
