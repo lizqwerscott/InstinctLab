@@ -149,6 +149,7 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
                 "height_scan": (4 * 21 * 33,),
             },
             "critic": {
+                "base_lin_vel": (24,),
                 "base_ang_vel": (24,),
                 "projected_gravity": (24,),
                 "velocity_commands": (24,),
@@ -159,6 +160,7 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
             },
         },
         "num_moe_experts": 4,
+        "moe_gate_hidden_dims": [],
         "num_actions": 29,
         "num_rewards": 1,
     }
