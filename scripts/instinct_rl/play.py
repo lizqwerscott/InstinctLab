@@ -25,6 +25,7 @@ parser.add_argument("--exportonnx", action="store_true", default=False, help="Ex
 parser.add_argument("--exportjit", action="store_true", default=False, help="Export policy as TorchScript model.")
 parser.add_argument("--debug", action="store_true", default=False, help="Enable debug mode.")
 parser.add_argument("--no_resume", default=None, action="store_true", help="Force play in no resume mode.")
+parser.add_argument("--teacher_logdir", type=str, default=None, help="Teacher Logdir.")
 # custom play arguments
 parser.add_argument("--env_cfg", action="store_true", default=False, help="Load configuration from file.")
 parser.add_argument("--agent_cfg", action="store_true", default=False, help="Load configuration from file.")
