@@ -42,6 +42,7 @@ class EncoderConfigs:
 class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
     init_noise_std = 1.0
     num_moe_experts = 4
+    moe_gate_hidden_dims = [256]
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
     activation = "elu"
