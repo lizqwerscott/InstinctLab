@@ -58,7 +58,7 @@ gym.register(
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{task_entry}.g1_parkour_target_amp_cfg:G1ParkourStudentEnvCfg",
+        "env_cfg_entry_point": f"{task_entry}.g1_parkour_target_amp_cfg:G1ParkourStudentFinetuneEnvCfg",
         "instinct_rl_cfg_entry_point": f"{agents.__name__}.instinct_rl_amp_cfg:G1ParkourStudentFinetunePPORunnerCfg",
     },
 )
@@ -69,7 +69,7 @@ gym.register(
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{task_entry}.g1_parkour_target_amp_cfg:G1ParkourStudentEnvCfg_PLAY",
+        "env_cfg_entry_point": f"{task_entry}.g1_parkour_target_amp_cfg:G1ParkourStudentFinetuneEnvCfg_PLAY",
         "instinct_rl_cfg_entry_point": f"{agents.__name__}.instinct_rl_amp_cfg:G1ParkourStudentFinetunePPORunnerCfg",
     },
 )

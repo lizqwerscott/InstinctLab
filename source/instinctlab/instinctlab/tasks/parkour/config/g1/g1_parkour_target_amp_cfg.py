@@ -17,7 +17,7 @@ from instinctlab.motion_reference import MotionReferenceManagerCfg
 from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMotionCfg as AmassMotionCfgBase
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
 from instinctlab.sensors import get_link_prim_targets
-from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ParkourEnvCfg, ParkourStudentEnvCfg
+from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ObservationsCfg, ParkourEnvCfg, ParkourStudentEnvCfg
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 G1_CFG = copy.deepcopy(G1_29DOF_TORSOBASE_POPSICLE_CFG)
@@ -203,3 +203,26 @@ class G1ParkourStudentEnvCfg_PLAY(G1ParkourStudentRoughEnvCfg_PLAY, ShoeConfigMi
     def __post_init__(self):
         super().__post_init__()
         self.apply_shoe_config()
+
+
+@configclass
+class G1ParkourStudentFinetuneEnvCfg(G1ParkourStudentEnvCfg):
+    """Student env (depth policy obs) whose critic group is swapped for the teacher's
+    920-dim critic (prepends `base_lin_vel`). This lets the pretrained Wasabi-teacher
+    critic weights load directly when finetuning the distilled student, instead of
+    training a critic from scratch. Actor and AMP observation groups are unchanged.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # teacher CriticCfg == student critic + base_lin_vel (first term) => 920-dim,
+        # matching the teacher critic loaded via the `merge_student_actor_teacher_critic`
+        # checkpoint manipulator.
+        self.observations.critic = ObservationsCfg.CriticCfg()
+
+
+@configclass
+class G1ParkourStudentFinetuneEnvCfg_PLAY(G1ParkourStudentEnvCfg_PLAY):
+    def __post_init__(self):
+        super().__post_init__()
+        self.observations.critic = ObservationsCfg.CriticCfg()

@@ -246,6 +246,9 @@ class InstinctRlOnPolicyRunnerCfg:
     model. Default is None for no manipulation.
     """
 
+    ckpt_manipulator_kwargs = dict()
+    """Extra keyword arguments forwarded to the checkpoint manipulator function. Empty dict by default."""
+
     policy: InstinctRlActorCriticCfg = MISSING
     """The policy configuration."""
 

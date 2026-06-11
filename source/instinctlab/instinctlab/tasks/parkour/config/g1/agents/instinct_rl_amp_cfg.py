@@ -56,7 +56,7 @@ class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
 
 @configclass
 class MoEStudentPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
-    init_noise_std = 1.0
+    init_noise_std = 0.1
     num_moe_experts = 4
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
@@ -100,6 +100,20 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
 
 
 @configclass
+class AmpAlgoFinetuneCfg(AmpAlgoCfg):
+    # Critic warm-up: the merged checkpoint carries the teacher's critic, which estimates
+    # V^{pi_teacher}; even with advantage normalization its *relative* values are wrong for
+    # the student policy. For the first N iterations only value_loss is optimized (actor and
+    # entropy terms zeroed; value clipping and adaptive-KL lr suspended) so the critic re-fits
+    # V^{pi_student} before any policy update.
+    critic_warmup_iterations = 100
+
+    # Conservative starting lr for finetuning an already-competent distilled policy; the
+    # adaptive-KL schedule (desired_kl=0.01) takes over after warmup.
+    learning_rate = 1.0e-4
+
+
+@configclass
 class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     class_name = "TPPO"
 
@@ -115,17 +129,22 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     num_mini_batches = 4
     learning_rate = 1e-3
 
-    # One-Cycle LR schedule (paper Table XII): initial lr 1e-3, div_factor=10 (peak/init)
-    # => max_lr=1e-2, final_div_factor=50 (final/init). TPPO steps the scheduler once per
-    # update() (i.e. once per learning iteration), so total_steps MUST match the runner's
-    # max_iterations (G1ParkourStudentPPORunnerCfg.max_iterations) to avoid over-stepping.
+    # One-Cycle LR schedule (paper Table XII): initial lr 1e-3, div_factor=3 (peak/init).
+    # OneCycle ramps the lr UP for the first ~30% of total_steps, which fights late-training
+    # stability; the 0608 run (max_lr=1e-2) showed distill loss worsening as lr climbed. Keep
+    # the peak low (2e-3). TPPO steps the scheduler once per update() (i.e. once per learning
+    # iteration), so total_steps MUST match the runner's max_iterations
+    # (G1ParkourStudentPPORunnerCfg.max_iterations) to avoid over-stepping.
     lr_scheduler_class_name = "OneCycleLR"
     lr_scheduler: dict = {
-        "max_lr": 1.0e-2,
+        "max_lr": 2.0e-3,
         "total_steps": 30000,
-        "div_factor": 10.0,
+        "div_factor": 2.0,
         "final_div_factor": 50.0,
     }
+
+    teacher_act_prob = "tanh"
+    update_times_scale = 15000
 
     teacher_policy_class_name = MoEPolicyCfg().class_name
 
@@ -181,7 +200,7 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
         "num_rewards": 1,
     }
     teacher_logdir = os.path.expanduser(
-        "~/Data/instinctlab_logs/instinct_rl/g1_perceptive_shadowing/20260111_103654_g1Perceptive_4MotionsKneelClimbStep1_concatMotionBins__GPU0_from20260108_032900"
+        "~/Data/20260603_112548"
     )
     value_loss_coef = 1.0
     use_clipped_value_loss = True
@@ -227,10 +246,27 @@ class G1ParkourStudentPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
 class G1ParkourStudentFinetunePPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 30000
-    save_interval = 5000
+    save_interval = 2000
     experiment_name = "g1_parkour_student_finetune"
-    resume = False
-    load_run = ""
+
+    # Finetune the distilled (depth) student with RL (WasabiPPO). The actor comes from the
+    # student checkpoint; the critic, discriminator (+ its optimizer) and the converged
+    # per-joint action std come from the Wasabi teacher, assembled by the
+    # `merge_student_actor_teacher_critic` ckpt manipulator. The main PPO optimizer is
+    # re-initialized (not merged) for stability.
+    resume = True
+    load_run = os.path.expanduser(
+        "~/parkour/InstinctLab/logs/instinct_rl/g1_parkour_student/20260609_144817"
+    )
+    load_checkpoint = "model_20000.pt"
+    ckpt_manipulator = "merge_student_actor_teacher_critic"
+    ckpt_manipulator_kwargs = {
+        "teacher_ckpt_path": os.path.expanduser("~/Data/20260603_112548/model_39000.pt"),
+        "copy_discriminator_optimizer": True,
+        "std_from_teacher": True,
+        "reset_iter": True,
+    }
+
     empirical_normalization = False
     policy = MoEStudentPolicyCfg()
-    algorithm = AmpAlgoCfg()
+    algorithm = AmpAlgoFinetuneCfg()
