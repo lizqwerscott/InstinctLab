@@ -35,6 +35,25 @@ def feet_air_time(env, command_name: str, vel_threshold: float, sensor_cfg: Scen
     return reward
 
 
+def feet_stumble(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    ratio: float = 3.0,
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Penalize feet hitting vertical edges based on abnormal horizontal contact force."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+
+    lateral_force = torch.norm(forces[..., :2], dim=-1)
+    vertical_force = torch.abs(forces[..., 2])
+    total_force = torch.norm(forces, dim=-1)
+
+    in_contact = total_force > contact_threshold
+    stumble = in_contact & (lateral_force > ratio * vertical_force)
+    return torch.sum(torch.any(stumble, dim=1).float(), dim=-1)
+
+
 def stand_still(
     env: ManagerBasedRLEnv,
     command_name: str,

@@ -642,6 +642,15 @@ class G1Rewards:
             "threshold": 1.0,
         },
     )
+    feet_stumble = RewTerm(
+        func=mdp.feet_stumble,
+        weight=-0.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "ratio": 3.0,
+            "contact_threshold": 1.0,
+        },
+    )
     joint_deviation_hip = RewTerm(
         func=mdp.joint_deviation_square,
         weight=-0.5,
