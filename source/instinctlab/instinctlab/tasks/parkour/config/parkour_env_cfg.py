@@ -264,6 +264,20 @@ class SceneCfg(InteractiveSceneCfg):
         mesh_prim_paths=["/World/ground"],
         update_period=0.02,
     )
+
+    # 前向碰撞检测射线 (左右脚)
+    left_fwd_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.08, 0.0, 0.05)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[0.3, 0.15], direction=(1.0, 0.0, 0.0)),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+        update_period=0.02,
+    )
+    right_fwd_scanner = left_fwd_scanner.copy()
+    right_fwd_scanner.prim_path = "{ENV_REGEX_NS}/Robot/right_ankle_roll_link"
+
     contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
     leg_volume_points = VolumePointsCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
@@ -685,6 +699,17 @@ class G1Rewards:
             "right_height_scanner_cfg": SceneEntityCfg("right_height_scanner"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "height_offset": 0.035,
+        },
+    )
+
+    foot_collision_penalty = RewTerm(
+        func=mdp.foot_collision_penalty,
+        weight=-0.5,
+        params={
+            "left_fwd_scanner_cfg": SceneEntityCfg("left_fwd_scanner"),
+            "right_fwd_scanner_cfg": SceneEntityCfg("right_fwd_scanner"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "d_unsafe": 0.15,
         },
     )
     feet_close_xy = RewTerm(
