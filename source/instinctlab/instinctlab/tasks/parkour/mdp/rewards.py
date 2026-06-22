@@ -246,14 +246,18 @@ def foot_collision_penalty(
         d_colli = torch.clamp(1 - min_dist / d_unsafe, min=0.0)
 
         # 最终惩罚 (负值)
-        penalty = -p_colli * d_colli
-        penalty = penalty * valid_foot.float()
-        penalty = penalty * has_any.float()
+        # 使用 torch.where 避免 NaN 传播：当 valid_foot 且 has_any 时计算惩罚，否则为 0
+        # 注意：NaN * 0.0 = NaN (PyTorch 行为)，所以不能靠乘 mask 来消除 NaN
+        penalty = torch.where(
+            valid_foot & has_any,
+            -p_colli * d_colli,
+            torch.zeros(env.num_envs, device=env.device)
+        )
         penalties.append(penalty)
 
     # 左右脚惩罚之和
     total_penalty = penalties[0] + penalties[1]
-    return total_penalty
+    return total_penalty.nan_to_num(0.0)
 
 
 def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
