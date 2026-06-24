@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-import torch
+import weakref
 from typing import TYPE_CHECKING
 
+import isaaclab.sim as sim_utils
+import omni.kit.app
+import torch
 from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_apply_inverse
 
@@ -208,10 +212,41 @@ class FootholdProximityReward(ManagerTermBase):
         foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
         self._foot_order: list[str] = [foot_names[i] for i in self._asset_cfg.body_ids]
 
+        # Debug visualization (play mode)
+        self._debug_vis = cfg.params.get("debug_vis", False)
+        self._debug_vis_handle = None
+        self._foothold_visualizer = None
+        if self._debug_vis:
+            vis_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/FootholdTargets",
+                markers={
+                    "left": sim_utils.SphereCfg(
+                        radius=0.04,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.0, 0.0, 1.0)
+                        ),
+                    ),
+                    "right": sim_utils.SphereCfg(
+                        radius=0.04,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.0, 1.0, 0.0)
+                        ),
+                    ),
+                },
+            )
+            self._foothold_visualizer = VisualizationMarkers(vis_cfg)
+            app_interface = omni.kit.app.get_app_interface()
+            self._debug_vis_handle = (
+                app_interface.get_post_update_event_stream().create_subscription_to_pop(
+                    lambda event, obj=weakref.proxy(self): obj._debug_vis_callback(event)
+                )
+            )
+
     def __call__(
         self,
         env: ManagerBasedRLEnv,
         sigma_p: float = 10.0,
+        debug_vis: bool = False,
         asset_cfg: SceneEntityCfg | None = None,
         sensor_cfg: SceneEntityCfg | None = None,
         heightmap_sensor_cfg: SceneEntityCfg | None = None,
@@ -265,6 +300,26 @@ class FootholdProximityReward(ManagerTermBase):
         dist_sq = ((body_pos - self._p_star_cache) ** 2).sum(dim=-1)   # (N, 2)
         swing_mask = (~in_contact).float()                              # (N, 2)
         return (swing_mask * torch.exp(-sigma_p * dist_sq)).sum(dim=-1)  # (N,)
+
+    def _debug_vis_callback(self, event):
+        """每帧渲染缓存的脚目标位置。"""
+        if self._foothold_visualizer is None:
+            return
+        n = self._p_star_cache.shape[0]
+        if n == 0:
+            return
+        # _p_star_cache: (N, 2, 3) -> permute(1,0,2) -> (2, N, 3) -> reshape -> (2*N, 3)
+        # 先摆放所有 N 个左脚，再摆放所有 N 个右脚
+        poses = self._p_star_cache.permute(1, 0, 2).reshape(-1, 3)
+        marker_indices = torch.zeros(2 * n, dtype=torch.int, device=self.device)
+        marker_indices[n:] = 1  # 右脚 -> marker 索引 1 (绿色)
+        self._foothold_visualizer.visualize(poses, marker_indices=marker_indices)
+
+    def __del__(self):
+        """清理事件订阅。"""
+        if self._debug_vis_handle is not None:
+            self._debug_vis_handle.unsubscribe()
+            self._debug_vis_handle = None
 
     def reset(self, env_ids: torch.Tensor | None = None):
         """Reset per-env caches (called by RewardManager on env reset)."""
