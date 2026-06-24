@@ -2,6 +2,8 @@ import math
 import os
 from dataclasses import MISSING
 
+import torch
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -362,6 +364,19 @@ class SceneCfg(InteractiveSceneCfg):
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
+
+    heightmap = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
+        mesh_prim_paths=["/World/ground"],
+        pattern_cfg=patterns.GridPatternCfg(
+            resolution=0.05,
+            size=(1.80, 1.20),
+            direction=(0.0, 0.0, -1.0),
+        ),
+        debug_vis=False,
+    )
+
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -696,6 +711,18 @@ class G1Rewards:
             "std": math.sqrt(0.05),
         },
     )
+
+    foothold_proximity = RewTerm(
+        func=mdp.FootholdProximityReward,
+        weight=2.0,
+        params={
+            "sigma_p": 10.0,
+            "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+        },
+    )
+
     energy = RewTerm(
         func=mdp.motors_power_square,
         weight=-5e-5,

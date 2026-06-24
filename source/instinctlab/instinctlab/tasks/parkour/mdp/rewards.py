@@ -3,12 +3,14 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+from instinctlab.tasks.parkour.mdp.dcm_planner import DCMFootholdPlanner
 
 
 def feet_air_time(env, command_name: str, vel_threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -171,3 +173,114 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
     link_projected_gravity = quat_apply_inverse(link_quat, asset.data.GRAVITY_VEC_W)
 
     return torch.sum(torch.square(link_projected_gravity[:, :2]), dim=1)
+
+class FootholdProximityReward(ManagerTermBase):
+    """Dense reward for tracking DCM foothold targets.
+
+    Maintains a DCMFootholdPlanner + per-foot target caches so the reward
+    target is stable within each swing phase (only re-planned at swing onset).
+
+    Config params (resolved by the reward manager before __init__):
+        asset_cfg (SceneEntityCfg): robot body config filtered to foot links.
+        sensor_cfg (SceneEntityCfg): contact_forces sensor filtered to foot links.
+        heightmap_sensor_cfg (SceneEntityCfg): heightmap sensor in scene.
+
+    Call-time params (passed via RewTerm.params):
+        sigma_p (float): Gaussian sharpness for proximity reward.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        # Read SceneEntityCfg; keep in params so signature validation passes
+        self._asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        self._sensor_cfg: SceneEntityCfg = cfg.params["sensor_cfg"]
+        self._heightmap_sensor_cfg: SceneEntityCfg = cfg.params["heightmap_sensor_cfg"]
+
+        # Planner
+        self._planner = DCMFootholdPlanner(
+            num_envs=env.num_envs, device=env.device,
+        )
+        # Per-foot caching: [left, right] order (as returned by body_ids)
+        self._p_star_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
+        self._was_in_contact = torch.ones(env.num_envs, 2, dtype=torch.bool, device=env.device)
+
+        # Resolve foot order by name (for correct left/right assignment)
+        foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
+        self._foot_order: list[str] = [foot_names[i] for i in self._asset_cfg.body_ids]
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        sigma_p: float = 10.0,
+        asset_cfg: SceneEntityCfg | None = None,
+        sensor_cfg: SceneEntityCfg | None = None,
+        heightmap_sensor_cfg: SceneEntityCfg | None = None,
+    ) -> torch.Tensor:
+        """Compute foothold proximity reward.
+
+        Returns (N,) tensor: sum of exp(-sigma_p * dist^2) per swinging foot.
+        """
+        # ---- 1. Foot positions & contact ---------------------------------
+        asset = env.scene[self._asset_cfg.name]
+        body_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3)
+
+        contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
+        net_force = contact_sensor.data.net_forces_w_history          # (N, hist, n_bodies_all)
+        contact_norm = torch.norm(
+            net_force[:, -1, self._sensor_cfg.body_ids], dim=-1       # (N, 2)
+        )
+        in_contact = contact_norm > 1.0                               # (N, 2)
+
+        # ---- 2. Swing onset detection per foot ---------------------------
+        swing_onset = (~in_contact) & self._was_in_contact             # (N, 2)
+
+        # ---- 3. Re-plan at swing onset for each foot ---------------------
+        root_pos = asset.data.root_pos_w                               # (N, 3)
+        v_cmd = env.command_manager.get_command("base_velocity")[:, :2]  # (N, 2)
+        heightmap = self._get_heightmap(env, root_pos)                 # (N, 25, 37)
+
+        # Pre-compute both scenarios (fully batched on GPU)
+        #   Left-swing  → stance = right foot (index 1)
+        #   Right-swing → stance = left foot  (index 0)
+        p_left_swing = self._planner.plan_in_world(
+            heightmap, v_cmd, body_pos[:, 1], root_pos,
+            -torch.ones(env.num_envs, device=env.device),
+        )  # (N, 3)
+        p_right_swing = self._planner.plan_in_world(
+            heightmap, v_cmd, body_pos[:, 0], root_pos,
+            torch.ones(env.num_envs, device=env.device),
+        )  # (N, 3)
+
+        # Update cache where swing just started
+        self._p_star_cache[:, 0] = torch.where(
+            swing_onset[:, 0:1], p_left_swing, self._p_star_cache[:, 0],
+        )
+        self._p_star_cache[:, 1] = torch.where(
+            swing_onset[:, 1:2], p_right_swing, self._p_star_cache[:, 1],
+        )
+
+        self._was_in_contact = in_contact
+
+        # ---- 4. Reward: Gaussian proximity per swinging foot -------------
+        dist_sq = ((body_pos - self._p_star_cache) ** 2).sum(dim=-1)   # (N, 2)
+        swing_mask = (~in_contact).float()                              # (N, 2)
+        return (swing_mask * torch.exp(-sigma_p * dist_sq)).sum(dim=-1)  # (N,)
+
+    def reset(self, env_ids: torch.Tensor | None = None):
+        """Reset per-env caches (called by RewardManager on env reset)."""
+        if env_ids is None:
+            env_ids = slice(None)
+        self._p_star_cache[env_ids] = 0.0
+        self._was_in_contact[env_ids] = True
+
+    def _get_heightmap(self, env: ManagerBasedRLEnv, root_pos: torch.Tensor) -> torch.Tensor:
+        """Return (N, 25, 37) pelvis-local terrain heights (NaN = ray missed)."""
+        sensor = env.scene[self._heightmap_sensor_cfg.name]
+        hits_w = sensor.data.ray_hits_w                                 # (N, num_rays, 3)
+        num_rays = hits_w.shape[1]
+        H, W = 25, num_rays // 25
+        hits_local = (hits_w - root_pos.unsqueeze(1)).view(-1, H, W, 3)
+        z = hits_local[..., 2]                                          # (N, H, W)
+        # Mark ray-miss: hit z much lower than robot root
+        missed = hits_w.view(-1, H, W, 3)[..., 2] < -100.0
+        return torch.where(missed, torch.full_like(z, float("nan")), z)
