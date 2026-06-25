@@ -42,8 +42,8 @@ from instinctlab.utils.noise import (
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 
 VELOCITY_RANGE = {
-    "x": (-0.5, 0.5),
-    "y": (-0.5, 0.5),
+    "x": (-0.8, 0.8),
+    "y": (-0.8, 0.8),
     "z": (-0.2, 0.2),
     "roll": (-0.52, 0.52),
     "pitch": (-0.52, 0.52),
@@ -55,10 +55,10 @@ VELOCITY_RANGE = {
 ##
 ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     seed=0,
-    size=(8.0, 8.0),
+    size=(12.0, 12.0),
     border_width=3,
-    num_rows=10,
-    num_cols=20,
+    num_rows=5,
+    num_cols=10,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=1.0,
@@ -78,7 +78,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             wall_thickness=0.05,
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
+                    num_patches=120, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
                 ),
             },
         ),
@@ -95,7 +95,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             wall_thickness=0.05,
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
+                    num_patches=120, patch_radius=[0.05, 0.10, 0.15, 0.20], max_height_diff=0.05
                 ),
             },
         ),
@@ -118,10 +118,10 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
+                    x_range=(5.7, 5.7),
                     y_range=(-0.0, 0.0),
                 ),
             },
@@ -145,10 +145,10 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
+                    x_range=(5.7, 5.7),
                     y_range=(-0.0, 0.0),
                 ),
             },
@@ -158,7 +158,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             per_step_height=[0.05, 0.23],
             per_step_width=2.0,
             per_step_length=(0.25, 0.3),
-            num_steps=(4, 8),
+            num_steps=(12, 14),
             platform_length=2.5,
             wall_prob=[0.3, 0.3, 0.3, 0.3],
             wall_height=5.0,
@@ -176,10 +176,10 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
+                    x_range=(5.7, 5.7),
                     y_range=(0.0, 0.0),
                 ),
             }
@@ -189,7 +189,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             per_step_height=[0.05, 0.23],
             per_step_width=2.0,
             per_step_length=(0.25, 0.3),
-            num_steps=(4, 8),
+            num_steps=(12, 14),
             platform_length=2.5,
             wall_prob=[0.3, 0.3, 0.3, 0.3],
             wall_height=5.0,
@@ -204,10 +204,10 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             ),
             flat_patch_sampling={
                 "target": FlatPatchSamplingCfg(
-                    num_patches=50,
+                    num_patches=120,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
+                    x_range=(5.7, 5.7),
                     y_range=(0.0, 0.0),
                 ),
             }
