@@ -42,8 +42,8 @@ from instinctlab.utils.noise import (
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 
 VELOCITY_RANGE = {
-    "x": (-0.5, 0.5),
-    "y": (-0.5, 0.5),
+    "x": (-0.8, 0.8),
+    "y": (-0.8, 0.8),
     "z": (-0.2, 0.2),
     "roll": (-0.52, 0.52),
     "pitch": (-0.52, 0.52),
