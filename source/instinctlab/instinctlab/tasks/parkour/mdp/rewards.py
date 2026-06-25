@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 from instinctlab.tasks.parkour.mdp.dcm_planner import DCMFootholdPlanner
 
-
 def feet_air_time(env, command_name: str, vel_threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     """Reward long steps taken by the feet for bipeds.
 
@@ -178,6 +177,7 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
 
     return torch.sum(torch.square(link_projected_gravity[:, :2]), dim=1)
 
+
 class FootholdProximityReward(ManagerTermBase):
     """Dense reward for tracking DCM foothold targets.
 
@@ -193,12 +193,11 @@ class FootholdProximityReward(ManagerTermBase):
         sigma_p (float): Gaussian sharpness for proximity reward.
     """
 
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+    def __init__(self, cfg, env: "ManagerBasedRLEnv"):
         super().__init__(cfg, env)
-        # Read SceneEntityCfg; keep in params so signature validation passes
-        self._asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
-        self._sensor_cfg: SceneEntityCfg = cfg.params["sensor_cfg"]
-        self._heightmap_sensor_cfg: SceneEntityCfg = cfg.params["heightmap_sensor_cfg"]
+        self._asset_cfg = cfg.params["asset_cfg"]
+        self._sensor_cfg = cfg.params["sensor_cfg"]
+        self._heightmap_sensor_cfg = cfg.params["heightmap_sensor_cfg"]
 
         # Planner
         self._planner = DCMFootholdPlanner(
@@ -212,7 +211,7 @@ class FootholdProximityReward(ManagerTermBase):
         foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
         self._foot_order: list[str] = [foot_names[i] for i in self._asset_cfg.body_ids]
 
-        # Debug visualization (play mode)
+        # ---- Debug visualisation ----
         self._debug_vis = cfg.params.get("debug_vis", False)
         self._debug_vis_handle = None
         self._foothold_visualizer = None
@@ -242,21 +241,25 @@ class FootholdProximityReward(ManagerTermBase):
                 )
             )
 
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
     def __call__(
         self,
-        env: ManagerBasedRLEnv,
+        env: "ManagerBasedRLEnv",
         sigma_p: float = 10.0,
         debug_vis: bool = False,
-        asset_cfg: SceneEntityCfg | None = None,
-        sensor_cfg: SceneEntityCfg | None = None,
-        heightmap_sensor_cfg: SceneEntityCfg | None = None,
+        asset_cfg=None,
+        sensor_cfg=None,
+        heightmap_sensor_cfg=None,
     ) -> torch.Tensor:
         """Compute foothold proximity reward.
 
-        Returns (N,) tensor: sum of exp(-sigma_p * dist^2) per swinging foot.
+        Returns (N,) tensor: sum of exp(-sigma_p * dist²) per swinging foot.
         """
-        # ---- 1. Foot positions & contact ---------------------------------
         asset = env.scene[self._asset_cfg.name]
+
+        # ---- 1. Foot positions & contact ---------------------------------
         body_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3)
 
         contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
@@ -271,19 +274,29 @@ class FootholdProximityReward(ManagerTermBase):
 
         # ---- 3. Re-plan at swing onset for each foot ---------------------
         root_pos = asset.data.root_pos_w                               # (N, 3)
-        v_cmd = env.command_manager.get_command("base_velocity")[:, :2]  # (N, 2)
+        root_quat = asset.data.root_quat_w                             # (N, 4) w,x,y,z
+        v_cmd = env.command_manager.get_command("base_velocity")[:, :2]  # (N, 2) world
         heightmap = self._get_heightmap(env, root_pos)                 # (N, 25, 37)
 
+        # [FIX] Approximate CoM state from root (pelvis) state.
+        # For a well-designed humanoid the pelvis is close to the CoM;
+        # if you have explicit CoM data (e.g. from a rigid-body API),
+        # pass that instead for better accuracy.
+        com_pos_w = root_pos                                          # (N, 3)
+        com_vel_w = asset.data.root_lin_vel_w                          # (N, 3)
+
         # Pre-compute both scenarios (fully batched on GPU)
-        #   Left-swing  → stance = right foot (index 1)
-        #   Right-swing → stance = left foot  (index 0)
+        #   Left-swing  → stance = right foot (index 1), sign = -1
+        #   Right-swing → stance = left foot  (index 0), sign = +1
         p_left_swing = self._planner.plan_in_world(
-            heightmap, v_cmd, body_pos[:, 1], root_pos,
+            heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
             -torch.ones(env.num_envs, device=env.device),
+            com_pos_w=com_pos_w, com_vel_w=com_vel_w,
         )  # (N, 3)
         p_right_swing = self._planner.plan_in_world(
-            heightmap, v_cmd, body_pos[:, 0], root_pos,
+            heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
             torch.ones(env.num_envs, device=env.device),
+            com_pos_w=com_pos_w, com_vel_w=com_vel_w,
         )  # (N, 3)
 
         # Update cache where swing just started
@@ -301,26 +314,24 @@ class FootholdProximityReward(ManagerTermBase):
         swing_mask = (~in_contact).float()                              # (N, 2)
         return (swing_mask * torch.exp(-sigma_p * dist_sq)).sum(dim=-1)  # (N,)
 
+    # ------------------------------------------------------------------
+    # Debug visualisation
+    # ------------------------------------------------------------------
     def _debug_vis_callback(self, event):
-        """每帧渲染缓存的脚目标位置。"""
+        """Render cached foothold target markers every frame."""
         if self._foothold_visualizer is None:
             return
         n = self._p_star_cache.shape[0]
         if n == 0:
             return
-        # _p_star_cache: (N, 2, 3) -> permute(1,0,2) -> (2, N, 3) -> reshape -> (2*N, 3)
-        # 先摆放所有 N 个左脚，再摆放所有 N 个右脚
+        # _p_star_cache: (N, 2, 3) -> (2, N, 3) -> (2*N, 3)
         poses = self._p_star_cache.permute(1, 0, 2).reshape(-1, 3)
-        marker_indices = torch.zeros(2 * n, dtype=torch.int, device=self.device)
-        marker_indices[n:] = 1  # 右脚 -> marker 索引 1 (绿色)
+        marker_indices = torch.zeros(2 * n, dtype=torch.int, device=self._p_star_cache.device)
+        marker_indices[n:] = 1  # right foot -> green
         self._foothold_visualizer.visualize(poses, marker_indices=marker_indices)
 
-    def __del__(self):
-        """清理事件订阅。"""
-        if self._debug_vis_handle is not None:
-            self._debug_vis_handle.unsubscribe()
-            self._debug_vis_handle = None
 
+    # ------------------------------------------------------------------
     def reset(self, env_ids: torch.Tensor | None = None):
         """Reset per-env caches (called by RewardManager on env reset)."""
         if env_ids is None:
@@ -328,14 +339,20 @@ class FootholdProximityReward(ManagerTermBase):
         self._p_star_cache[env_ids] = 0.0
         self._was_in_contact[env_ids] = True
 
-    def _get_heightmap(self, env: ManagerBasedRLEnv, root_pos: torch.Tensor) -> torch.Tensor:
-        """Return (N, 25, 37) pelvis-local terrain heights (NaN = ray missed)."""
+    # ------------------------------------------------------------------
+    def _get_heightmap(self, env: "ManagerBasedRLEnv", root_pos: torch.Tensor) -> torch.Tensor:
+        """Return (N, 25, 37) pelvis-local terrain heights (NaN = ray missed).
+
+        The z-component of (hit_world - root_pos) gives the height
+        relative to the pelvis origin.  This is frame-rotation-invariant
+        (pure z differencing), so no yaw handling is needed here.
+        """
         sensor = env.scene[self._heightmap_sensor_cfg.name]
         hits_w = sensor.data.ray_hits_w                                 # (N, num_rays, 3)
         num_rays = hits_w.shape[1]
         H, W = 25, num_rays // 25
-        hits_local = (hits_w - root_pos.unsqueeze(1)).view(-1, H, W, 3)
-        z = hits_local[..., 2]                                          # (N, H, W)
-        # Mark ray-miss: hit z much lower than robot root
+        # Relative height (world z - pelvis z)
+        z_rel = (hits_w[..., 2] - root_pos[:, 2].unsqueeze(1)).view(-1, H, W)
+        # Mark ray-miss: hit world-z far below any reasonable terrain
         missed = hits_w.view(-1, H, W, 3)[..., 2] < -100.0
-        return torch.where(missed, torch.full_like(z, float("nan")), z)
+        return torch.where(missed, torch.full_like(z_rel, float("nan")), z_rel)

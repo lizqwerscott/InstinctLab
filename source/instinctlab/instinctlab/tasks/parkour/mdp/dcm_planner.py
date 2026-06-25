@@ -15,12 +15,21 @@ import math
 import torch
 import torch.nn.functional as F
 
+from isaaclab.utils.math import quat_apply_inverse
+
 
 # ---------------------------------------------------------------------------
 # Sobel kernels (cached at planner construction)
 # ---------------------------------------------------------------------------
 def _make_sobel_kernels(device, dtype=torch.float32):
-    """3x3 Sobel-x and Sobel-y kernels for normalized gradients."""
+    """3x3 Sobel-x and Sobel-y kernels.
+
+    NOTE: divided by 8 to normalise the gradient approximation so that a
+    height change of 1 cell over 1 cell gives |g| ~ 1.  This means the
+    alpha_E weight directly controls the cost per-unit-gradient.  If you
+    want to match an un-normalised Sobel (paper convention), remove the
+    "/ 8.0" and increase alpha_E by ~8x.
+    """
     kx = torch.tensor(
         [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
         device=device, dtype=dtype,
@@ -86,18 +95,17 @@ class DCMFootholdPlanner:
         self.lp = lp
 
         # ---- Pre-compute cell-center coords in pelvis-local frame ----
-        # Indexing convention: (i, j) where i = row = y, j = col = x.
         xs = (torch.arange(grid_w, device=device, dtype=torch.float32)
-              - (grid_w - 1) / 2) * cell_size            # (W,)
+              - (grid_w - 1) / 2) * cell_size
         ys = (torch.arange(grid_h, device=device, dtype=torch.float32)
-              - (grid_h - 1) / 2) * cell_size            # (H,)
-        self.grid_y, self.grid_x = torch.meshgrid(ys, xs, indexing='ij')  # (H, W)
+              - (grid_h - 1) / 2) * cell_size
+        self.grid_y, self.grid_x = torch.meshgrid(ys, xs, indexing='ij')
 
-        # ---- LIPM constants (Eq. 5 / b_nom) ----
+        # ---- LIPM constants ----
         self.omega0 = math.sqrt(9.81 / z0)
         self.exp_wT = math.exp(self.omega0 * T)
-        self.bx_coef = T / (self.exp_wT - 1.0)           # multiplies vx
-        self.by_coef = lp / (1.0 + self.exp_wT)          # multiplies sign(f)
+        self.bx_coef = T / (self.exp_wT - 1.0)
+        self.by_coef = lp / (self.exp_wT - 1.0)
 
         # ---- Cost weights ----
         self.alpha_pos   = alpha_pos
@@ -114,7 +122,7 @@ class DCMFootholdPlanner:
         self.v_star = v_star
         self.v_min  = v_min
 
-        # ---- Sobel kernels (used for steepness) ----
+        # ---- Sobel kernels ----
         self.kx, self.ky = _make_sobel_kernels(device)
 
     # -----------------------------------------------------------------------
@@ -123,40 +131,48 @@ class DCMFootholdPlanner:
     def plan(
         self,
         heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
-        v_cmd: torch.Tensor,             # (N, 2) commanded velocity (vx, vy)
+        v_cmd: torch.Tensor,             # (N, 2) commanded velocity in pelvis-local
         stance_xyz_local: torch.Tensor,  # (N, 3) stance foot in pelvis-local
-        swing_leg_sign: torch.Tensor,    # (N,) ±1
+        swing_leg_sign: torch.Tensor,    # (N,) +-1
+        com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
+        com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
     ) -> torch.Tensor:
-        """
-        Returns p_star (N, 3): best (x, y, z) in pelvis-local frame.
-        """
+        """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
         N = heightmap.shape[0]
         H, W = self.grid_h, self.grid_w
         device = self.device
 
-        # ---- Mask invalid cells: replace NaN with a very negative value
-        # so that max_pool ignores them naturally.
+        # ---- Validity mask ----
         valid = ~torch.isnan(heightmap)
-        h_safe = torch.where(valid, heightmap,
-                             torch.tensor(-1.0e3, device=device))
-        h_in = h_safe.unsqueeze(1)                       # (N, 1, H, W)
+
+        # Q: -inf/+inf sentinels so invalid cells never win max/min.
+        h_for_max = torch.where(
+            valid, heightmap,
+            torch.tensor(float('-inf'), device=device, dtype=heightmap.dtype),
+        ).unsqueeze(1)
+        h_for_min = torch.where(
+            valid, heightmap,
+            torch.tensor(float('inf'), device=device, dtype=heightmap.dtype),
+        ).unsqueeze(1)
+
+        # For M, E, and argmin z-lookup: 0-fill (neutral for dz).
+        h_safe = torch.where(valid, heightmap, torch.zeros_like(heightmap))
+
+        pad_h, pad_w = self.fp_h // 2, self.fp_w // 2
 
         # =================================================================
         # Channel 1: Flatness Q (Eq. 2)
-        #   Q_i = max(z) - min(z) over the footprint-sized kernel
         # =================================================================
-        pad_h, pad_w = self.fp_h // 2, self.fp_w // 2
-        Q_max = F.max_pool2d(h_in, (self.fp_h, self.fp_w), stride=1,
+        Q_max = F.max_pool2d(h_for_max, (self.fp_h, self.fp_w), stride=1,
                              padding=(pad_h, pad_w))
-        # min via -max(-h)
-        Q_min = -F.max_pool2d(-h_in, (self.fp_h, self.fp_w), stride=1,
-                              padding=(pad_h, pad_w))
-        Q = (Q_max - Q_min).squeeze(1)[:, :H, :W]          # (N, H, W)  clamp to original grid size
+        Q_min = F.max_pool2d(h_for_min, (self.fp_h, self.fp_w), stride=1,
+                             padding=(pad_h, pad_w))
+        Q = (Q_max - Q_min).squeeze(1)[:, :H, :W]
 
         # =================================================================
         # Channel 2: Steepness E (Eq. 3)
-        #   E_i = max_{j in N_i} sqrt(g_x^2 + g_y^2)
         # =================================================================
+        h_in = h_safe.unsqueeze(1)
         gx = F.conv2d(h_in, self.kx, padding=1)
         gy = F.conv2d(h_in, self.ky, padding=1)
         grad = torch.sqrt(gx ** 2 + gy ** 2 + 1e-6)
@@ -165,45 +181,52 @@ class DCMFootholdPlanner:
 
         # =================================================================
         # Channel 3 & 4: Feasibility M and Climb bonus b (Eq. 4-5)
-        #   Use velocity-aware effective max step height
         # =================================================================
-        vx = v_cmd[:, 0]                                 # (N,)
+        vx = v_cmd[:, 0]
         vy = v_cmd[:, 1]
         vx_abs = vx.abs()
         h_eff = self.h_min + (self.h_max - self.h_min) * torch.clamp(
-            vx_abs / self.v_star, 0.0, 1.0)              # (N,)
+            vx_abs / self.v_star, 0.0, 1.0)
         h_eff_map = h_eff.view(N, 1, 1)
 
-        stance_z = stance_xyz_local[:, 2]                # (N,)
-        dz = h_safe - stance_z.view(N, 1, 1)            # (N, H, W)
+        stance_z = stance_xyz_local[:, 2]
+        dz = h_safe - stance_z.view(N, 1, 1)
         abs_dz = dz.abs()
 
-        # M: quadratic overshoot penalty above h_eff
         M = torch.clamp(abs_dz - h_eff_map, min=0.0) ** 2
 
-        # b: capped upward-step bonus, gated on minimum speed
         climb_pos = torch.clamp(dz, min=0.0).clamp(max=h_eff_map)
         b = climb_pos * (vx_abs > self.v_min).view(N, 1, 1).float()
 
         # =================================================================
-        # Position residual d_pos and DCM residual d_dcm (Eq. 1 terms)
+        # Position residual d_pos (Eq. 1 first term)
         # =================================================================
-        gx_map = self.grid_x.unsqueeze(0)                # (1, H, W)
+        gx_map = self.grid_x.unsqueeze(0)
         gy_map = self.grid_y.unsqueeze(0)
         vx_map = vx.view(N, 1, 1)
         vy_map = vy.view(N, 1, 1)
         sgn_map = swing_leg_sign.view(N, 1, 1).float()
 
-        # d_pos: asymmetric — penalize lateral more than sagittal (β=2.5)
         d_pos = (gx_map - vx_map * self.T) ** 2 + self.beta * (
             gy_map - (vy_map * self.T + sgn_map * self.lp)) ** 2
 
-        # Steady-state nominal step offset b_nom
-        bx = vx * self.bx_coef                           # (N,)
-        by = swing_leg_sign.float() * self.by_coef       # (N,)
+        # =================================================================
+        # DCM residual d_dcm (Eq. 1 second term)
+        # =================================================================
+        bx = vx * self.bx_coef
+        by = swing_leg_sign.float() * self.by_coef
         bx_map = bx.view(N, 1, 1)
         by_map = by.view(N, 1, 1)
-        d_dcm = (gx_map - bx_map) ** 2 + (gy_map - by_map) ** 2
+
+        if com_local is not None and com_vel_local is not None:
+            xi_0_x = com_local[:, 0] + com_vel_local[:, 0] / self.omega0
+            xi_0_y = com_local[:, 1] + com_vel_local[:, 1] / self.omega0
+            xi_T_x = (xi_0_x * self.exp_wT).view(N, 1, 1)
+            xi_T_y = (xi_0_y * self.exp_wT).view(N, 1, 1)
+            d_dcm = ((xi_T_x - gx_map - bx_map) ** 2
+                     + (xi_T_y - gy_map - by_map) ** 2)
+        else:
+            d_dcm = (gx_map - bx_map) ** 2 + (gy_map - by_map) ** 2
 
         # =================================================================
         # Total cost (Eq. 1)
@@ -215,26 +238,21 @@ class DCMFootholdPlanner:
              self.alpha_M     * M -
              self.alpha_climb * b)
 
-        # Mask invalid cells
         J = torch.where(valid, J, torch.full_like(J, float('inf')))
 
         # =================================================================
         # Argmin
         # =================================================================
         J_flat = J.view(N, -1)
-        best_idx = torch.argmin(J_flat, dim=-1)          # (N,)
-        i = best_idx // W                                 # row -> y
-        j = best_idx %  W                                 # col -> x
+        best_idx = torch.argmin(J_flat, dim=-1)
+        i = best_idx // W
+        j = best_idx %  W
 
-        # Index into pre-computed grid (and the safe heightmap for z)
-        p_star_x = self.grid_x[i, j]                      # (N,)
-        p_star_y = self.grid_y[i, j]                      # (N,)
+        p_star_x = self.grid_x[i, j]
+        p_star_y = self.grid_y[i, j]
         p_star_z = h_safe[torch.arange(N, device=device), i, j]
 
-        # =================================================================
-        # Low-velocity override: at near-standstill, freeze the target to
-        # the current stance foot (Eq. 5 fallback in the paper)
-        # =================================================================
+        # Low-velocity override (paper S3.2 fallback)
         low_speed = vx_abs < self.v_min
         p_star_x = torch.where(low_speed, stance_xyz_local[:, 0], p_star_x)
         p_star_y = torch.where(low_speed, stance_xyz_local[:, 1], p_star_y)
@@ -251,10 +269,36 @@ class DCMFootholdPlanner:
         v_cmd: torch.Tensor,                # (N, 2) world-frame velocity
         stance_xyz_world: torch.Tensor,     # (N, 3) stance foot world pos
         root_pos_w: torch.Tensor,           # (N, 3) pelvis world pos
+        root_quat_w: torch.Tensor,          # (N, 4) pelvis world quat (w,x,y,z)
         swing_leg_sign: torch.Tensor,       # (N,)
+        com_pos_w: torch.Tensor | None = None,   # (N, 3) CoM world pos
+        com_vel_w: torch.Tensor | None = None,   # (N, 3) CoM world vel
     ) -> torch.Tensor:
         """Compute best foothold in world frame."""
-        stance_local = stance_xyz_world - root_pos_w
-        p_local = self.plan(heightmap, v_cmd, stance_local, swing_leg_sign)
-        return p_local + root_pos_w
+        N = root_pos_w.shape[0]
+        zeros1 = torch.zeros(N, 1, device=root_pos_w.device, dtype=root_pos_w.dtype)
 
+        # -- Velocity: world -> pelvis-local --
+        v_3d = torch.cat([v_cmd, zeros1], dim=-1)
+        v_local = quat_apply_inverse(root_quat_w, v_3d)[:, :2]
+
+        # -- Stance foot: world -> pelvis-local --
+        stance_local = quat_apply_inverse(root_quat_w, stance_xyz_world - root_pos_w)
+
+        # -- CoM: world -> pelvis-local (optional) --
+        com_local = com_vel_local = None
+        if com_pos_w is not None and com_vel_w is not None:
+            com_local = quat_apply_inverse(root_quat_w, com_pos_w - root_pos_w)[:, :2]
+            com_vel_local = quat_apply_inverse(root_quat_w, com_vel_w)[:, :2]
+
+        # -- Plan in pelvis-local frame --
+        p_local = self.plan(
+            heightmap, v_local, stance_local,
+            swing_leg_sign, com_local, com_vel_local,
+        )
+
+        # -- Rotate back: pelvis-local -> world --
+        q_conj = root_quat_w.clone()
+        q_conj[:, 1:] *= -1.0  # conjugate: quat_apply_inverse(q*, v) == quat_apply(q, v)
+        p_world = quat_apply_inverse(q_conj, p_local) + root_pos_w
+        return p_world
