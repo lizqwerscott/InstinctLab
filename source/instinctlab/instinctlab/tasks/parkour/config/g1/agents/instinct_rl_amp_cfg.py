@@ -14,13 +14,14 @@ from instinctlab.utils.wrappers.instinct_rl import (
 @configclass
 class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
     output_size = 128
-    channels = [4]
-    kernel_sizes = [3]
-    strides = [1]
-    hidden_sizes = [256, 256]
-    paddings = [1]
-    nonlinearity = "ReLU"
-    use_maxpool = True
+    channels = [16, 32, 64]
+    kernel_sizes = [3, 3, 3]
+    strides = [1, 2, 2]
+    hidden_sizes = [256]  
+    paddings = [1, 1, 1]
+    nonlinearity = "SiLU"
+    use_maxpool = False
+    final_nonlinearity = False
     component_names = [
         "depth_image",
     ]
@@ -58,6 +59,7 @@ class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
 class MoEStudentPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
     init_noise_std = 0.1
     num_moe_experts = 4
+    moe_gate_hidden_dims = [ 128 ]
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
     activation = "elu"
@@ -140,11 +142,14 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
         "max_lr": 2.0e-3,
         "total_steps": 30000,
         "div_factor": 2.0,
-        "final_div_factor": 50.0,
+        "final_div_factor": 100.0,
+        "pct_start": 0.0167,
+        "three_phase": True,
+        "cycle_momentum": False,
     }
 
-    teacher_act_prob = "tanh"
-    update_times_scale = 15000
+    teacher_act_prob = "linear"
+    update_times_scale = 1000
 
     teacher_policy_class_name = MoEPolicyCfg().class_name
 
