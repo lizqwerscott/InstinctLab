@@ -123,7 +123,7 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     # max_iterations (G1ParkourStudentPPORunnerCfg.max_iterations) to avoid over-stepping.
     lr_scheduler_class_name = "OneCycleLR"
     lr_scheduler: dict = {
-        "max_lr": 1.0e-2,
+        "max_lr": 2.0e-3,
         "total_steps": 30000,
         "div_factor": 2.0,
         "final_div_factor": 100.0,
