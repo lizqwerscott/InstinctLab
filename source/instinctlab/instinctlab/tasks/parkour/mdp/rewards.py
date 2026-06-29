@@ -396,17 +396,25 @@ class FootholdProximityReward(ManagerTermBase):
         # returns (N, H, W)-shaped tensors for each key.
         merged: dict[str, torch.Tensor] = {}
         for key in self._channels_left:
-            left_val = self._channels_left[key]    # (N, H, W)
-            right_val = self._channels_right[key]  # (N, H, W)
+            left_val = self._channels_left[key]    # (N, H, W) or (N,)
+            right_val = self._channels_right[key]  # (N, H, W) or (N,)
             # left foot in contact  → stance on left  → right leg is swinging
             # right foot in contact → stance on right → left leg is swinging
             # Use right-val when left foot is in contact (right is swinging)
             # Use left-val  when left foot is swinging
-            merged[key] = torch.where(
-                in_contact[:, 0:1, None],  # (N, 1, 1) — left foot in contact?
-                right_val,   # yes → right is swinging
-                left_val,    # no  → left is swinging
-            )
+            if left_val.dim() == 1:
+                # Scalar-per-env channels (e.g. best_idx: (N,))
+                merged[key] = torch.where(
+                    in_contact[:, 0],   # (N,)
+                    right_val,          # (N,)
+                    left_val,           # (N,)
+                )
+            else:
+                merged[key] = torch.where(
+                    in_contact[:, 0:1, None],  # (N, 1, 1) — left foot in contact?
+                    right_val,   # yes → right is swinging
+                    left_val,    # no  → left is swinging
+                )
 
         self._cost_visualizer.update(
             channels=merged,

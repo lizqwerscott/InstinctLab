@@ -269,7 +269,7 @@ class DCMFootholdPlanner:
             com_local, com_vel_local,
         )
         return self._argmin(channels['J'], channels['h_safe'],
-                            v_cmd[:, 0].abs(), stance_xyz_local)
+                            v_cmd[:, 0].abs(), stance_xyz_local)[0]
 
     def _argmin(
         self,
@@ -277,8 +277,12 @@ class DCMFootholdPlanner:
         h_safe: torch.Tensor,      # (N, H, W) safe heights
         vx_abs: torch.Tensor,      # (N,) absolute forward velocity
         stance_xyz_local: torch.Tensor,  # (N, 3) stance foot
-    ) -> torch.Tensor:
-        """Argmin over J, return (N, 3) p_star in pelvis-local."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Argmin over J, return (p_star, best_idx) in pelvis-local.
+
+        p_star: (N, 3) best foothold position.
+        best_idx: (N,) flat index into H*W grid of the selected cell.
+        """
         N, H, W = J.shape
         J_flat = J.view(N, -1)
         best_idx = torch.argmin(J_flat, dim=-1)
@@ -295,7 +299,12 @@ class DCMFootholdPlanner:
         p_star_y = torch.where(low_speed, stance_xyz_local[:, 1], p_star_y)
         p_star_z = torch.where(low_speed, stance_xyz_local[:, 2], p_star_z)
 
-        return torch.stack([p_star_x, p_star_y, p_star_z], dim=-1)
+        p_star = torch.stack([p_star_x, p_star_y, p_star_z], dim=-1)
+
+        # For low-speed envs, mark best_idx as invalid (set to -1)
+        best_idx = torch.where(low_speed, -1, best_idx)
+
+        return p_star, best_idx
 
     def plan_with_channels(
         self,
@@ -315,8 +324,9 @@ class DCMFootholdPlanner:
             heightmap, v_cmd, stance_xyz_local, swing_leg_sign,
             com_local, com_vel_local,
         )
-        p_star = self._argmin(channels['J'], channels['h_safe'],
-                              v_cmd[:, 0].abs(), stance_xyz_local)
+        p_star, best_idx = self._argmin(channels['J'], channels['h_safe'],
+                                         v_cmd[:, 0].abs(), stance_xyz_local)
+        channels['best_idx'] = best_idx
         return p_star, channels
 
     def plan_with_channels_in_world(

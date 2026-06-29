@@ -20,10 +20,12 @@ def _build_colored_cube_markers(
     num_bins: int = 20,
     base_prim_path: str = "/Visuals/DCMCostMap",
 ) -> VisualizationMarkersCfg:
-    """Create a config with *num_bins* cube primitives forming a blue→red gradient.
+    """Create a config with *num_bins* cube primitives forming a blue→red gradient,
+    plus one extra bright-red cube for the selected (argmin) cell.
 
     Each prototype is a small cube with a distinct colour.  The gradient
     goes through cyan and yellow so all bins are visually separable.
+    The final prototype (``selected``) is a slightly larger bright-red cube.
     """
     markers = {}
     for i in range(num_bins):
@@ -41,6 +43,11 @@ def _build_colored_cube_markers(
             size=(0.045, 0.045, 0.02),
             visual_material=PreviewSurfaceCfg(diffuse_color=(r, g, b)),
         )
+    # Bright-red marker for the selected (argmin) cell
+    markers["selected"] = CuboidCfg(
+        size=(0.06, 0.06, 0.025),
+        visual_material=PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+    )
     return VisualizationMarkersCfg(prim_path=base_prim_path, markers=markers)
 
 
@@ -86,7 +93,7 @@ class DCMCostVisualizer:
         self._gy = planner.grid_y.reshape(-1)  # (H*W,)
         self._num_cells = self._gx.shape[0]
 
-        # Create visualisation markers (20 coloured cube prototypes)
+        # Create visualisation markers (20 coloured cube prototypes + 1 selected)
         # Single prim path — all environments' markers are batched in one
         # PointInstancer.  The env-to-world pose is handled per-marker in update().
         vis_cfg = _build_colored_cube_markers(
@@ -135,6 +142,8 @@ class DCMCostVisualizer:
 
         all_world_pos = []
         all_bin_idx = []
+        sel_world_pos: list[torch.Tensor] = []
+        sel_bin_idx: list[torch.Tensor] = []
 
         for i in range(n_envs):
             # Skip envs where both feet are in contact (no swing to show)
@@ -161,8 +170,10 @@ class DCMCostVisualizer:
             bin_idx = (c_norm * 19).long().clamp(0, 19)  # keep on original device
 
             # Build local positions
+            # Lift markers by a small fixed offset so they float above the terrain
+            # and are clearly visible (avoids being partially buried / occluded).
             local_pos = torch.stack(
-                [self._gx[mask], self._gy[mask], z[mask]], dim=-1
+                [self._gx[mask], self._gy[mask], z[mask] + 0.5], dim=-1
             )  # (n_valid, 3)
 
             # Rotate pelvis-local → world: p_w = R(q) @ p_local + t
@@ -173,13 +184,44 @@ class DCMCostVisualizer:
             all_world_pos.append(world_pos)
             all_bin_idx.append(bin_idx)
 
+            # ---- Selected cell (red cube) ----
+            best_idx = channels.get("best_idx")  # (N,) flat index or None
+            if best_idx is not None:
+                bi = best_idx[i].item()
+                if bi >= 0:  # valid (not low-speed override)
+                    # Convert flat index to local (x, y, z)
+                    sx = self._gx[bi]
+                    sy = self._gy[bi]
+                    sz = h_safe[i].reshape(-1)[bi]
+                    sel_local = torch.tensor(
+                        [sx, sy, sz + 0.03], device=self._device
+                    ).unsqueeze(0)  # (1, 3)
+                    # Transform to world
+                    q_conj = root_quat_w[i].clone()
+                    q_conj[1:] *= -1.0
+                    sel_world = quat_apply_inverse(
+                        q_conj, sel_local
+                    ) + root_pos_w[i]
+                    sel_world_pos.append(sel_world)
+                    # index = 20 (the "selected" prototype)
+                    sel_bin_idx.append(
+                        torch.tensor([20], device=self._device, dtype=torch.long)
+                    )
+
         if not all_world_pos:
             self._visualizer.visualize(translations=None)
             return
 
+        # Merge heatmap markers and selected markers into one call
+        all_pos = [torch.cat(all_world_pos, dim=0)]
+        all_idx = [torch.cat(all_bin_idx, dim=0)]
+        if sel_world_pos:
+            all_pos.append(torch.cat(sel_world_pos, dim=0))
+            all_idx.append(torch.cat(sel_bin_idx, dim=0))
+
         self._visualizer.visualize(
-            translations=torch.cat(all_world_pos, dim=0),
-            marker_indices=torch.cat(all_bin_idx, dim=0),
+            translations=torch.cat(all_pos, dim=0),
+            marker_indices=torch.cat(all_idx, dim=0),
         )
 
     def set_active_channel(self, name: str):
