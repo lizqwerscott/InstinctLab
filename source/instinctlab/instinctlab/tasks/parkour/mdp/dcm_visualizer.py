@@ -51,10 +51,14 @@ class DCMCostVisualizer:
     world coordinates and drawn as a small coloured cube.  Colour encodes
     the cost value via a 20-bin blue→red gradient (low cost = blue).
 
+    All parallel environments are rendered simultaneously by concatenating
+    their markers into a single :meth:`VisualizationMarkers.visualize` call.
+    Environments where both feet are in contact (no valid swing) are skipped.
+
     .. code-block:: python
 
-        vis = DCMCostVisualizer(planner, num_envs=1, device=env.device)
-        vis.update(channels, heightmap, root_pos_w, root_quat_w)
+        vis = DCMCostVisualizer(planner, num_envs=4096, device=env.device)
+        vis.update(channels, heightmap, root_pos_w, root_quat_w, in_contact=contact)
     """
 
     CHANNEL_NAMES = ("Q", "E", "M", "b", "d_pos", "d_dcm", "J")
@@ -65,7 +69,6 @@ class DCMCostVisualizer:
         num_envs: int,
         device: str,
         active_channel: str = "J",
-        env_idx: int = 0,
     ):
         """
         Args:
@@ -73,12 +76,10 @@ class DCMCostVisualizer:
             num_envs: Number of parallel environments (unused, for interface consistency).
             device: Torch device string.
             active_channel: Which cost channel to display (default: ``"J"``).
-            env_idx: Which environment index to visualise (default: ``0``).
         """
         self._planner = planner
         self._device = device
         self._active_channel = active_channel
-        self._env_idx = env_idx
 
         # Grid coordinates from planner (pelvis-local frame, flattened)
         self._gx = planner.grid_x.reshape(-1)  # (H*W,)
@@ -86,8 +87,10 @@ class DCMCostVisualizer:
         self._num_cells = self._gx.shape[0]
 
         # Create visualisation markers (20 coloured cube prototypes)
+        # Single prim path — all environments' markers are batched in one
+        # PointInstancer.  The env-to-world pose is handled per-marker in update().
         vis_cfg = _build_colored_cube_markers(
-            base_prim_path=f"/Visuals/DCMCostMap/env_{env_idx}",
+            base_prim_path="/Visuals/DCMCostMap",
         )
         self._visualizer = VisualizationMarkers(vis_cfg)
 
@@ -100,66 +103,83 @@ class DCMCostVisualizer:
         heightmap: torch.Tensor,
         root_pos_w: torch.Tensor,
         root_quat_w: torch.Tensor,
+        in_contact: torch.Tensor | None = None,
     ):
-        """Render the active cost channel for env_idx as a heatmap.
+        """Render the active cost channel for *all* environments as a heatmap.
+
+        Each environment's cost map is transformed to world coordinates and
+        concatenated into a single :meth:`visualize` call, so the single
+        :class:`VisualizationMarkers` draws cubes for every env simultaneously.
 
         Args:
             channels: Output dict from ``planner.plan_with_channels*()``.
             heightmap: Pelvis-local heightmap ``(N, H, W)`` (used only for z-values).
             root_pos_w: Pelvis world position ``(N, 3)``.
             root_quat_w: Pelvis world quaternion ``(N, 4)`` (w, x, y, z).
+            in_contact: Contact state ``(N, 2)`` bool — if provided the visualiser
+                hides markers for environments where *both* feet are in contact
+                (no valid swing foot to show).
         """
-        idx = self._env_idx
-        if idx >= channels["J"].shape[0]:
-            return  # env index out of range
-
+        n_envs = channels["J"].shape[0]
         ch_name = self._active_channel
-        cost = channels[ch_name][idx]  # (H, W)
-        # valid mask: use planner's valid if available, else all-true
+
+        cost = channels[ch_name]           # (N, H, W)
         if "valid" in channels:
-            valid = channels["valid"][idx]  # (H, W) bool
+            valid = channels["valid"]      # (N, H, W) bool
         else:
             valid = torch.ones_like(cost, dtype=torch.bool)
-        # h_safe: use planner's safe heights if available, else raw heightmap
         if "h_safe" in channels:
-            h_safe = channels["h_safe"][idx]  # (H, W)
+            h_safe = channels["h_safe"]   # (N, H, W)
         else:
-            h_safe = heightmap[idx]  # (H, W)
+            h_safe = heightmap             # (N, H, W)
 
-        # Flatten
-        cost_flat = cost.reshape(-1)
-        valid_flat = valid.reshape(-1)
-        z_flat = h_safe.reshape(-1)
+        all_world_pos = []
+        all_bin_idx = []
 
-        mask = valid_flat
-        n_valid = mask.sum().item()
-        if n_valid == 0:
-            self._visualizer.visualize(translations=None)  # clear
+        for i in range(n_envs):
+            # Skip envs where both feet are in contact (no swing to show)
+            if in_contact is not None and i < in_contact.shape[0]:
+                if in_contact[i, 0].item() and in_contact[i, 1].item():
+                    continue
+
+            c = cost[i].reshape(-1)          # (H*W,)
+            v = valid[i].reshape(-1)         # (H*W,) bool
+            z = h_safe[i].reshape(-1)        # (H*W,)
+
+            mask = v
+            n_valid = mask.sum().item()
+            if n_valid == 0:
+                continue
+
+            # Min-max normalise → quantise to 0 … 19
+            c_sel = c[mask]
+            c_min, c_max = c_sel.min(), c_sel.max()
+            if c_max > c_min:
+                c_norm = (c_sel - c_min) / (c_max - c_min)
+            else:
+                c_norm = torch.zeros_like(c_sel)
+            bin_idx = (c_norm * 19).long().clamp(0, 19)  # keep on original device
+
+            # Build local positions
+            local_pos = torch.stack(
+                [self._gx[mask], self._gy[mask], z[mask]], dim=-1
+            )  # (n_valid, 3)
+
+            # Rotate pelvis-local → world: p_w = R(q) @ p_local + t
+            q_conj = root_quat_w[i].clone()
+            q_conj[1:] *= -1.0
+            world_pos = quat_apply_inverse(q_conj, local_pos) + root_pos_w[i]
+
+            all_world_pos.append(world_pos)
+            all_bin_idx.append(bin_idx)
+
+        if not all_world_pos:
+            self._visualizer.visualize(translations=None)
             return
 
-        # Min-max normalise → quantise to 0 … 19
-        c_sel = cost_flat[mask]
-        c_min, c_max = c_sel.min(), c_sel.max()
-        if c_max > c_min:
-            c_norm = (c_sel - c_min) / (c_max - c_min)
-        else:
-            c_norm = torch.zeros_like(c_sel)
-        bin_idx = (c_norm * 19).long().clamp(0, 19).cpu()
-
-        # Build world positions for valid cells
-        local_pos = torch.stack(
-            [self._gx[mask], self._gy[mask], z_flat[mask]], dim=-1
-        )  # (n_valid, 3)
-
-        # Rotate pelvis-local → world: p_w = R(q) @ p_local + t
-        q_conj = root_quat_w[idx].clone()
-        q_conj[1:] *= -1.0  # conjugate: apply same rotation but opposite direction
-        world_pos = quat_apply_inverse(q_conj, local_pos) + root_pos_w[idx]
-
-        # Render
         self._visualizer.visualize(
-            translations=world_pos,
-            marker_indices=bin_idx,
+            translations=torch.cat(all_world_pos, dim=0),
+            marker_indices=torch.cat(all_bin_idx, dim=0),
         )
 
     def set_active_channel(self, name: str):
@@ -170,10 +190,6 @@ class DCMCostVisualizer:
         """
         if name in self.CHANNEL_NAMES:
             self._active_channel = name
-
-    def set_env_index(self, idx: int):
-        """Change which environment is visualised."""
-        self._env_idx = idx
 
     def close(self):
         """Hide all markers."""

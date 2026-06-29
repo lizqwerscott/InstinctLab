@@ -251,7 +251,6 @@ class FootholdProximityReward(ManagerTermBase):
                 num_envs=env.num_envs,
                 device=env.device,
                 active_channel="J",
-                env_idx=0,
             )
 
             app_interface = omni.kit.app.get_app_interface()
@@ -386,31 +385,35 @@ class FootholdProximityReward(ManagerTermBase):
         if self._channels_left is None or self._channels_right is None:
             return
 
-        # Decide which side to visualise based on current contact state.
-        #   Left foot swinging  → show left-swing channels (stance=right)
-        #   Right foot swinging → show right-swing channels (stance=left)
-        #   Both in contact     → keep previous display (no-op)
+        # For each environment, pick the channel dict that corresponds to
+        # the swinging foot (left-swing  → channels_left,  right-swing → channels_right).
+        # The visualiser's update() already skips envs where both feet are
+        # in contact, so we pass in_contact along.
         in_contact = self._was_in_contact  # (N, 2) bool
-        # Use env 0 (the index configured in the visualizer)
-        env_idx = 0
-        if env_idx >= in_contact.shape[0]:
-            return
-        left_swinging = not in_contact[env_idx, 0].item()
-        right_swinging = not in_contact[env_idx, 1].item()
 
-        if left_swinging:
-            channels = self._channels_left
-        elif right_swinging:
-            channels = self._channels_right
-        else:
-            # Both feet in contact — no swing to show, keep last frame
-            return
+        # Build a merged channels dict: pick left or right data per-environment.
+        # Both *_left and *_right come from plan_with_channels_in_world which
+        # returns (N, H, W)-shaped tensors for each key.
+        merged: dict[str, torch.Tensor] = {}
+        for key in self._channels_left:
+            left_val = self._channels_left[key]    # (N, H, W)
+            right_val = self._channels_right[key]  # (N, H, W)
+            # left foot in contact  → stance on left  → right leg is swinging
+            # right foot in contact → stance on right → left leg is swinging
+            # Use right-val when left foot is in contact (right is swinging)
+            # Use left-val  when left foot is swinging
+            merged[key] = torch.where(
+                in_contact[:, 0:1, None],  # (N, 1, 1) — left foot in contact?
+                right_val,   # yes → right is swinging
+                left_val,    # no  → left is swinging
+            )
 
         self._cost_visualizer.update(
-            channels=channels,
+            channels=merged,
             heightmap=self._last_heightmap,
             root_pos_w=self._last_root_pos,
             root_quat_w=self._last_root_quat,
+            in_contact=in_contact,
         )
 
 
