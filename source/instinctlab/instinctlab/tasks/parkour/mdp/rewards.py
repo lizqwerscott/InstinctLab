@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 from instinctlab.tasks.parkour.mdp.dcm_planner import DCMFootholdPlanner
+from instinctlab.tasks.parkour.mdp.dcm_visualizer import DCMCostVisualizer
 
 def feet_air_time(env, command_name: str, vel_threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     """Reward long steps taken by the feet for bipeds.
@@ -204,7 +205,10 @@ class FootholdProximityReward(ManagerTermBase):
             num_envs=env.num_envs, device=env.device,
         )
         # Per-foot caching: [left, right] order (as returned by body_ids)
+        # Lazily initialised with actual foot positions on first __call__ to
+        # avoid rendering spheres at the world origin (0,0,0).
         self._p_star_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
+        self._p_star_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         self._was_in_contact = torch.ones(env.num_envs, 2, dtype=torch.bool, device=env.device)
 
         # Resolve foot order by name (for correct left/right assignment)
@@ -215,7 +219,11 @@ class FootholdProximityReward(ManagerTermBase):
         self._debug_vis = cfg.params.get("debug_vis", False)
         self._debug_vis_handle = None
         self._foothold_visualizer = None
+        self._cost_visualizer = None
+        self._channels_left = None
+        self._channels_right = None
         if self._debug_vis:
+            # --- Foothold target spheres ---
             vis_cfg = VisualizationMarkersCfg(
                 prim_path="/Visuals/FootholdTargets",
                 markers={
@@ -234,12 +242,29 @@ class FootholdProximityReward(ManagerTermBase):
                 },
             )
             self._foothold_visualizer = VisualizationMarkers(vis_cfg)
+            # Explicitly set visible (defensive — default should be True, but make sure)
+            self._foothold_visualizer.set_visibility(True)
+
+            # --- DCM cost-channel heatmap ---
+            self._cost_visualizer = DCMCostVisualizer(
+                planner=self._planner,
+                num_envs=env.num_envs,
+                device=env.device,
+                active_channel="J",
+                env_idx=0,
+            )
+
             app_interface = omni.kit.app.get_app_interface()
             self._debug_vis_handle = (
                 app_interface.get_post_update_event_stream().create_subscription_to_pop(
                     lambda event, obj=weakref.proxy(self): obj._debug_vis_callback(event)
                 )
             )
+
+        # ---- Debug: print status ----
+        print(f"[FootholdProximityReward] debug_vis={self._debug_vis}, "
+              f"visualizer={'created' if self._foothold_visualizer is not None else 'None'},"
+              f" num_envs={env.num_envs}, device={env.device}")
 
     # ------------------------------------------------------------------
 
@@ -288,16 +313,42 @@ class FootholdProximityReward(ManagerTermBase):
         # Pre-compute both scenarios (fully batched on GPU)
         #   Left-swing  → stance = right foot (index 1), sign = -1
         #   Right-swing → stance = left foot  (index 0), sign = +1
-        p_left_swing = self._planner.plan_in_world(
-            heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
-            -torch.ones(env.num_envs, device=env.device),
-            com_pos_w=com_pos_w, com_vel_w=com_vel_w,
-        )  # (N, 3)
-        p_right_swing = self._planner.plan_in_world(
-            heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
-            torch.ones(env.num_envs, device=env.device),
-            com_pos_w=com_pos_w, com_vel_w=com_vel_w,
-        )  # (N, 3)
+
+        # ---- 3a. Lazy-init p_star_cache with actual foot positions -------
+        # Without this, the cache stays at (0,0,0) and foothold spheres
+        # render underground until the first swing onset is detected.
+        newly_uninitialized = ~self._p_star_initialized
+        if newly_uninitialized.any():
+            self._p_star_cache[newly_uninitialized, 0] = body_pos[newly_uninitialized, 0]
+            self._p_star_cache[newly_uninitialized, 1] = body_pos[newly_uninitialized, 1]
+            self._p_star_initialized[newly_uninitialized] = True
+        
+        # ---+ Cost-channel visualisation: store channels for _debug_vis_callback ---
+        if self._debug_vis and self._cost_visualizer is not None:
+            p_left_swing, self._channels_left = self._planner.plan_with_channels_in_world(
+                heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
+                -torch.ones(env.num_envs, device=env.device),
+                com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+            )  # (N, 3), dict
+            p_right_swing, self._channels_right = self._planner.plan_with_channels_in_world(
+                heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
+                torch.ones(env.num_envs, device=env.device),
+                com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+            )  # (N, 3), dict
+            self._last_heightmap = heightmap
+            self._last_root_pos = root_pos
+            self._last_root_quat = root_quat
+        else:
+            p_left_swing = self._planner.plan_in_world(
+                heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
+                -torch.ones(env.num_envs, device=env.device),
+                com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+            )  # (N, 3)
+            p_right_swing = self._planner.plan_in_world(
+                heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
+                torch.ones(env.num_envs, device=env.device),
+                com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+            )  # (N, 3)
 
         # Update cache where swing just started
         self._p_star_cache[:, 0] = torch.where(
@@ -318,17 +369,49 @@ class FootholdProximityReward(ManagerTermBase):
     # Debug visualisation
     # ------------------------------------------------------------------
     def _debug_vis_callback(self, event):
-        """Render cached foothold target markers every frame."""
-        if self._foothold_visualizer is None:
+        """Render cached foothold target markers + DCM cost heatmap every frame."""
+        # ---- Foothold spheres ----
+        if self._foothold_visualizer is not None:
+            n = self._p_star_cache.shape[0]
+            if n > 0:
+                # _p_star_cache: (N, 2, 3) -> (2, N, 3) -> (2*N, 3)
+                poses = self._p_star_cache.permute(1, 0, 2).reshape(-1, 3)
+                marker_indices = torch.zeros(2 * n, dtype=torch.int, device=self._p_star_cache.device)
+                marker_indices[n:] = 1  # right foot -> green
+                self._foothold_visualizer.visualize(poses, marker_indices=marker_indices)
+
+        # ---- DCM cost heatmap ----
+        if self._cost_visualizer is None:
             return
-        n = self._p_star_cache.shape[0]
-        if n == 0:
+        if self._channels_left is None or self._channels_right is None:
             return
-        # _p_star_cache: (N, 2, 3) -> (2, N, 3) -> (2*N, 3)
-        poses = self._p_star_cache.permute(1, 0, 2).reshape(-1, 3)
-        marker_indices = torch.zeros(2 * n, dtype=torch.int, device=self._p_star_cache.device)
-        marker_indices[n:] = 1  # right foot -> green
-        self._foothold_visualizer.visualize(poses, marker_indices=marker_indices)
+
+        # Decide which side to visualise based on current contact state.
+        #   Left foot swinging  → show left-swing channels (stance=right)
+        #   Right foot swinging → show right-swing channels (stance=left)
+        #   Both in contact     → keep previous display (no-op)
+        in_contact = self._was_in_contact  # (N, 2) bool
+        # Use env 0 (the index configured in the visualizer)
+        env_idx = 0
+        if env_idx >= in_contact.shape[0]:
+            return
+        left_swinging = not in_contact[env_idx, 0].item()
+        right_swinging = not in_contact[env_idx, 1].item()
+
+        if left_swinging:
+            channels = self._channels_left
+        elif right_swinging:
+            channels = self._channels_right
+        else:
+            # Both feet in contact — no swing to show, keep last frame
+            return
+
+        self._cost_visualizer.update(
+            channels=channels,
+            heightmap=self._last_heightmap,
+            root_pos_w=self._last_root_pos,
+            root_quat_w=self._last_root_quat,
+        )
 
 
     # ------------------------------------------------------------------
@@ -337,6 +420,7 @@ class FootholdProximityReward(ManagerTermBase):
         if env_ids is None:
             env_ids = slice(None)
         self._p_star_cache[env_ids] = 0.0
+        self._p_star_initialized[env_ids] = False
         self._was_in_contact[env_ids] = True
 
     # ------------------------------------------------------------------

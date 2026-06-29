@@ -126,9 +126,9 @@ class DCMFootholdPlanner:
         self.kx, self.ky = _make_sobel_kernels(device)
 
     # -----------------------------------------------------------------------
-    # Core: argmin over the local heightmap
+    # Shared channel computation
     # -----------------------------------------------------------------------
-    def plan(
+    def _compute_channels(
         self,
         heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
         v_cmd: torch.Tensor,             # (N, 2) commanded velocity in pelvis-local
@@ -136,8 +136,13 @@ class DCMFootholdPlanner:
         swing_leg_sign: torch.Tensor,    # (N,) +-1
         com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
-    ) -> torch.Tensor:
-        """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
+    ) -> dict[str, torch.Tensor]:
+        """Compute all intermediate cost channels.
+
+        Returns dict with keys:
+            Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
+        each of shape (N, H, W) except valid (bool).
+        """
         N = heightmap.shape[0]
         H, W = self.grid_h, self.grid_w
         device = self.device
@@ -240,9 +245,41 @@ class DCMFootholdPlanner:
 
         J = torch.where(valid, J, torch.full_like(J, float('inf')))
 
-        # =================================================================
-        # Argmin
-        # =================================================================
+        return {
+            'Q': Q, 'E': E, 'M': M, 'b': b,
+            'd_pos': d_pos, 'd_dcm': d_dcm, 'J': J,
+            'valid': valid, 'h_safe': h_safe,
+        }
+
+    # -----------------------------------------------------------------------
+    # Core: argmin over the local heightmap
+    # -----------------------------------------------------------------------
+    def plan(
+        self,
+        heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
+        v_cmd: torch.Tensor,             # (N, 2) commanded velocity in pelvis-local
+        stance_xyz_local: torch.Tensor,  # (N, 3) stance foot in pelvis-local
+        swing_leg_sign: torch.Tensor,    # (N,) +-1
+        com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
+        com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
+    ) -> torch.Tensor:
+        """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
+        channels = self._compute_channels(
+            heightmap, v_cmd, stance_xyz_local, swing_leg_sign,
+            com_local, com_vel_local,
+        )
+        return self._argmin(channels['J'], channels['h_safe'],
+                            v_cmd[:, 0].abs(), stance_xyz_local)
+
+    def _argmin(
+        self,
+        J: torch.Tensor,           # (N, H, W) total cost
+        h_safe: torch.Tensor,      # (N, H, W) safe heights
+        vx_abs: torch.Tensor,      # (N,) absolute forward velocity
+        stance_xyz_local: torch.Tensor,  # (N, 3) stance foot
+    ) -> torch.Tensor:
+        """Argmin over J, return (N, 3) p_star in pelvis-local."""
+        N, H, W = J.shape
         J_flat = J.view(N, -1)
         best_idx = torch.argmin(J_flat, dim=-1)
         i = best_idx // W
@@ -250,7 +287,7 @@ class DCMFootholdPlanner:
 
         p_star_x = self.grid_x[i, j]
         p_star_y = self.grid_y[i, j]
-        p_star_z = h_safe[torch.arange(N, device=device), i, j]
+        p_star_z = h_safe[torch.arange(N, device=self.device), i, j]
 
         # Low-velocity override (paper S3.2 fallback)
         low_speed = vx_abs < self.v_min
@@ -259,6 +296,73 @@ class DCMFootholdPlanner:
         p_star_z = torch.where(low_speed, stance_xyz_local[:, 2], p_star_z)
 
         return torch.stack([p_star_x, p_star_y, p_star_z], dim=-1)
+
+    def plan_with_channels(
+        self,
+        heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
+        v_cmd: torch.Tensor,             # (N, 2) commanded velocity in pelvis-local
+        stance_xyz_local: torch.Tensor,  # (N, 3) stance foot in pelvis-local
+        swing_leg_sign: torch.Tensor,    # (N,) +-1
+        com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
+        com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Returns (p_star, channels) where channels contains all intermediate costs.
+
+        p_star: (N, 3) best foothold in pelvis-local frame.
+        channels: dict with keys Q, E, M, b, d_pos, d_dcm, J, valid, h_safe.
+        """
+        channels = self._compute_channels(
+            heightmap, v_cmd, stance_xyz_local, swing_leg_sign,
+            com_local, com_vel_local,
+        )
+        p_star = self._argmin(channels['J'], channels['h_safe'],
+                              v_cmd[:, 0].abs(), stance_xyz_local)
+        return p_star, channels
+
+    def plan_with_channels_in_world(
+        self,
+        heightmap: torch.Tensor,            # (N, H, W) pelvis-local heights
+        v_cmd: torch.Tensor,                # (N, 2) world-frame velocity
+        stance_xyz_world: torch.Tensor,     # (N, 3) stance foot world pos
+        root_pos_w: torch.Tensor,           # (N, 3) pelvis world pos
+        root_quat_w: torch.Tensor,          # (N, 4) pelvis world quat (w,x,y,z)
+        swing_leg_sign: torch.Tensor,       # (N,)
+        com_pos_w: torch.Tensor | None = None,   # (N, 3) CoM world pos
+        com_vel_w: torch.Tensor | None = None,   # (N, 3) CoM world vel
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute best foothold in world frame + return all cost channels.
+
+        Returns (p_world, channels) where channels has keys:
+            Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
+        all in pelvis-local frame (shape N, H, W).
+        """
+        N = root_pos_w.shape[0]
+        zeros1 = torch.zeros(N, 1, device=root_pos_w.device, dtype=root_pos_w.dtype)
+
+        # -- Velocity: world -> pelvis-local --
+        v_3d = torch.cat([v_cmd, zeros1], dim=-1)
+        v_local = quat_apply_inverse(root_quat_w, v_3d)[:, :2]
+
+        # -- Stance foot: world -> pelvis-local --
+        stance_local = quat_apply_inverse(root_quat_w, stance_xyz_world - root_pos_w)
+
+        # -- CoM: world -> pelvis-local (optional) --
+        com_local = com_vel_local = None
+        if com_pos_w is not None and com_vel_w is not None:
+            com_local = quat_apply_inverse(root_quat_w, com_pos_w - root_pos_w)[:, :2]
+            com_vel_local = quat_apply_inverse(root_quat_w, com_vel_w)[:, :2]
+
+        # -- Plan in pelvis-local frame --
+        p_local, channels = self.plan_with_channels(
+            heightmap, v_local, stance_local,
+            swing_leg_sign, com_local, com_vel_local,
+        )
+
+        # -- Rotate back: pelvis-local -> world --
+        q_conj = root_quat_w.clone()
+        q_conj[:, 1:] *= -1.0
+        p_world = quat_apply_inverse(q_conj, p_local) + root_pos_w
+        return p_world, channels
 
     # -----------------------------------------------------------------------
     # Convenience: world-frame input / output
