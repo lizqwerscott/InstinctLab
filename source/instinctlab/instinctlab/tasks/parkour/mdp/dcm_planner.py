@@ -156,8 +156,8 @@ class DCMFootholdPlanner:
             torch.tensor(float('-inf'), device=device, dtype=heightmap.dtype),
         ).unsqueeze(1)
         h_for_min = torch.where(
-            valid, heightmap,
-            torch.tensor(float('inf'), device=device, dtype=heightmap.dtype),
+            valid, -heightmap,
+            torch.tensor(float('-inf'), device=device, dtype=heightmap.dtype)
         ).unsqueeze(1)
 
         # For M, E, and argmin z-lookup: 0-fill (neutral for dz).
@@ -170,8 +170,9 @@ class DCMFootholdPlanner:
         # =================================================================
         Q_max = F.max_pool2d(h_for_max, (self.fp_h, self.fp_w), stride=1,
                              padding=(pad_h, pad_w))
-        Q_min = F.max_pool2d(h_for_min, (self.fp_h, self.fp_w), stride=1,
-                             padding=(pad_h, pad_w))
+        Q_neg_min = F.max_pool2d(h_for_min, (self.fp_h, self.fp_w), stride=1,
+                                 padding=(pad_h, pad_w))
+        Q_min = -Q_neg_min
         Q = (Q_max - Q_min).squeeze(1)[:, :H, :W]
 
         # =================================================================
