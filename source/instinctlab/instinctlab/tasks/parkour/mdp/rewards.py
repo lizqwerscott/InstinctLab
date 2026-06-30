@@ -350,12 +350,17 @@ class FootholdProximityReward(ManagerTermBase):
             )  # (N, 3)
 
         # Update cache where swing just started
-        self._p_star_cache[:, 0] = torch.where(
-            swing_onset[:, 0:1], p_left_swing, self._p_star_cache[:, 0],
-        )
-        self._p_star_cache[:, 1] = torch.where(
-            swing_onset[:, 1:2], p_right_swing, self._p_star_cache[:, 1],
-        )
+        # self._p_star_cache[:, 0] = torch.where(
+        #     swing_onset[:, 0:1], p_left_swing, self._p_star_cache[:, 0],
+        # )
+        # self._p_star_cache[:, 1] = torch.where(
+        #     swing_onset[:, 1:2], p_right_swing, self._p_star_cache[:, 1],
+        # )
+
+        # # Always update cache every frame (continuous replanning)
+        self._p_star_cache[:, 0] = p_left_swing
+        self._p_star_cache[:, 1] = p_right_swing
+        
 
         self._was_in_contact = in_contact
 
