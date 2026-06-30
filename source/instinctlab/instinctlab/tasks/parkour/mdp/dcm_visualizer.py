@@ -194,7 +194,7 @@ class DCMCostVisualizer:
                     sy = self._gy[bi]
                     sz = h_safe[i].reshape(-1)[bi]
                     sel_local = torch.tensor(
-                        [sx, sy, sz + 0.03], device=self._device
+                        [sx, sy, sz + 0.5], device=self._device
                     ).unsqueeze(0)  # (1, 3)
                     # Transform to world
                     q_conj = root_quat_w[i].clone()
