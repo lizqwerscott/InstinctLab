@@ -59,7 +59,7 @@ import carb.input
 import omni.appwindow
 from carb.input import KeyboardEventType
 from instinct_rl.runners import OnPolicyRunner
-from instinct_rl.utils.utils import get_obs_slice, get_subobs_by_components, get_subobs_size
+from instinct_rl.utils.utils import get_obs_slice, get_subobs_by_components
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
@@ -173,31 +173,30 @@ def main():
     if args_cli.useonnx:
         from onnxer import load_parkour_onnx_model
 
+        depth_encoder_name = "depth_image_encoder"
+        depth_encoder_cfg = getattr(agent_cfg.policy.encoder_configs, depth_encoder_name, None)
+        if depth_encoder_cfg is None:
+            depth_encoder_name = "depth_encoder"
+            depth_encoder_cfg = getattr(agent_cfg.policy.encoder_configs, depth_encoder_name)
+        depth_components = list(depth_encoder_cfg.component_names)
+        proprio_components = [name for name in env.get_obs_segments() if name not in set(depth_components)]
+
         # NOTE: This is only applicable with parkour task
         onnx_policy = load_parkour_onnx_model(
             model_dir=os.path.join(log_dir, "exported"),
             get_subobs_func=lambda obs: get_subobs_by_components(
                 obs,
-                agent_cfg.policy.encoder_configs.depth_encoder.component_names,
+                depth_components,
                 env.get_obs_segments(),
                 temporal=True,
             ),
             depth_shape=env.get_obs_segments()["depth_image"],
-            proprio_slice=slice(
-                0,
-                get_subobs_size(
-                    env.get_obs_segments(),
-                    [
-                        "base_lin_vel",
-                        "base_ang_vel",
-                        "projected_gravity",
-                        "velocity_commands",
-                        "joint_pos",
-                        "joint_vel",
-                        "actions",
-                    ],
-                ),
+            get_proprio_func=lambda obs: get_subobs_by_components(
+                obs,
+                proprio_components,
+                env.get_obs_segments(),
             ),
+            encoder_name=depth_encoder_name,
         )
 
     override_command = torch.zeros(env.num_envs, 3, device=env.device)
@@ -249,6 +248,10 @@ def main():
                 actions[:] = 0.0
             # env stepping
             obs, rewards, dones, infos = env.step(actions)
+            if ppo_runner.alg.actor_critic.is_recurrent:
+                ppo_runner.alg.actor_critic.reset(dones)
+            if args_cli.useonnx and hasattr(onnx_policy, "reset"):
+                onnx_policy.reset(dones)
         timestep += 1
 
         # exit the loop if video_length is meet

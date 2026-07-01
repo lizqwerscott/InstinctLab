@@ -6,6 +6,7 @@ from instinctlab.utils.wrappers.instinct_rl import (
     InstinctRlConv2dHeadCfg,
     InstinctRlMlpCfg,
     InstinctRlEncoderMoEActorCriticCfg,
+    InstinctRlEncoderMoEActorCriticRecurrentCfg,
     InstinctRlOnPolicyRunnerCfg,
     InstinctRlPpoAlgorithmCfg,
 )
@@ -14,10 +15,10 @@ from instinctlab.utils.wrappers.instinct_rl import (
 @configclass
 class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
     output_size = 128
-    channels = [16, 32, 64]
+    channels = [32, 64, 128]
     kernel_sizes = [3, 3, 3]
-    strides = [1, 2, 2]
-    hidden_sizes = [256]
+    strides = [2, 2, 2]
+    hidden_sizes = []
     paddings = [1, 1, 1]
     nonlinearity = "SiLU"
     use_maxpool = False
@@ -56,13 +57,16 @@ class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
     critic_encoder_configs = EncoderConfigs()
 
 @configclass
-class MoEStudentPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
-    init_noise_std = 1.0
+class MoEStudentPolicyCfg(InstinctRlEncoderMoEActorCriticRecurrentCfg):
+    init_noise_std = 0.1
     num_moe_experts = 4
-    moe_gate_hidden_dims = [ 128 ]
-    actor_hidden_dims = [256, 128, 64]
+    moe_gate_hidden_dims = [128]
+    actor_hidden_dims = [512, 256, 128]
     critic_hidden_dims = [256, 128, 64]
     activation = "elu"
+    rnn_type = "gru"
+    rnn_hidden_size = 256
+    rnn_num_layers = 1
     encoder_configs = EncoderDepthConfigs()
     critic_encoder_configs = EncoderConfigs()
 
@@ -117,23 +121,24 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     num_mini_batches = 4
     learning_rate = 1e-3
 
-    # One-Cycle LR schedule (paper Table XII): initial lr 1e-3, div_factor=10 (peak/init)
-    # => max_lr=1e-2, final_div_factor=50 (final/init). TPPO steps the scheduler once per
-    # update() (i.e. once per learning iteration), so total_steps MUST match the runner's
-    # max_iterations (G1ParkourStudentPPORunnerCfg.max_iterations) to avoid over-stepping.
-    lr_scheduler_class_name = "OneCycleLR"
+    # lr_scheduler_class_name = "OneCycleLR"
+    # lr_scheduler: dict = {
+    #     "max_lr": 2.0e-3,
+    #     "total_steps": 30000,
+    #     "div_factor": 2.0,
+    #     "final_div_factor": 100.0,
+    #     "pct_start": 0.0167,
+    #     "three_phase": True,
+    #     "cycle_momentum": False,
+    # }
+    lr_scheduler_class_name = "CosineAnnealingLR"
     lr_scheduler: dict = {
-        "max_lr": 2.0e-3,
-        "total_steps": 30000,
-        "div_factor": 2.0,
-        "final_div_factor": 100.0,
-        "pct_start": 0.0167,
-        "three_phase": True,
-        "cycle_momentum": False,
+        "T_max": 30000,      # 必须等于 scheduler.step() 总次数
+        "eta_min": 1.0e-5,   # 终点最小 lr,可调
     }
 
     teacher_act_prob = "linear"
-    update_times_scale = 1000
+    update_times_scale = 500
 
     teacher_policy_class_name = MoEPolicyCfg().class_name
 
@@ -189,16 +194,16 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
         "num_rewards": 1,
     }
     teacher_logdir = os.path.expanduser(
-        "~/Data/instinctlab_logs/instinct_rl/g1_perceptive_shadowing/20260111_103654_g1Perceptive_4MotionsKneelClimbStep1_concatMotionBins__GPU0_from20260108_032900"
+        "~/Data/20260603_112548"
     )
     value_loss_coef = 1.0
     use_clipped_value_loss = True
     clip_param = 0.2
     entropy_coef = 0.006
     denoise_loss_coef = 0.1
-    num_learning_epochs = 5
-    num_mini_batches = 4
-    learning_rate = 1.0e-3
+    # num_learning_epochs = 5
+    # num_mini_batches = 4
+    # learning_rate = 1.0e-3
     schedule = "adaptive"
     gamma = 0.99
     lam = 0.95
