@@ -357,13 +357,11 @@ class FootholdProximityReward(ManagerTermBase):
                 k=k,
             )  # (N, 3)
 
-        # Update cache where swing just started
-        self._p_star_cache[:, 0] = torch.where(
-            swing_onset[:, 0:1], p_left_swing, self._p_star_cache[:, 0],
-        )
-        self._p_star_cache[:, 1] = torch.where(
-            swing_onset[:, 1:2], p_right_swing, self._p_star_cache[:, 1],
-        )
+        # Always update foothold targets for both feet every frame.
+        # Reward is masked by ~in_contact below, so only airborne feet
+        # contribute to the loss — but the planner runs every step regardless.
+        self._p_star_cache[:, 0] = p_left_swing
+        self._p_star_cache[:, 1] = p_right_swing
 
         self._was_in_contact = in_contact
 
