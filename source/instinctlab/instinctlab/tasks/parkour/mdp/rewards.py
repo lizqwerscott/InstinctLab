@@ -321,18 +321,24 @@ class FootholdProximityReward(ManagerTermBase):
             self._p_star_cache[newly_uninitialized, 0] = body_pos[newly_uninitialized, 0]
             self._p_star_cache[newly_uninitialized, 1] = body_pos[newly_uninitialized, 1]
             self._p_star_initialized[newly_uninitialized] = True
-        
+
+
+        k = 0.15 / 0.45  # stair height / max stair height to climb
+        k = k * torch.ones(env.num_envs, device=env.device)
+
         # ---+ Cost-channel visualisation: store channels for _debug_vis_callback ---
         if self._debug_vis and self._cost_visualizer is not None:
             p_left_swing, self._channels_left = self._planner.plan_with_channels_in_world(
                 heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
                 -torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+                k=k,
             )  # (N, 3), dict
             p_right_swing, self._channels_right = self._planner.plan_with_channels_in_world(
                 heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
                 torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+                k=k,
             )  # (N, 3), dict
             self._last_heightmap = heightmap
             self._last_root_pos = root_pos
@@ -342,11 +348,13 @@ class FootholdProximityReward(ManagerTermBase):
                 heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
                 -torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+                k=k,
             )  # (N, 3)
             p_right_swing = self._planner.plan_in_world(
                 heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
                 torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
+                k=k,
             )  # (N, 3)
 
         # Update cache where swing just started

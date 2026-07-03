@@ -10,6 +10,8 @@ used as a reward anchor for RL training.
 
 All ops are torch + F.max_pool2d / F.conv2d, fully GPU-batched.
 One forward call returns p*_f for every env.
+
+from https://arxiv.org/abs/2601.10365v1 and https://arxiv.org/abs/2601.10365v1
 """
 import math
 import torch
@@ -101,11 +103,13 @@ class DCMFootholdPlanner:
               - (grid_h - 1) / 2) * cell_size
         self.grid_y, self.grid_x = torch.meshgrid(ys, xs, indexing='ij')
 
-        # ---- LIPM constants ----
+        # ---- VHIP constants ----
+        self.z0 = z0
         self.omega0 = math.sqrt(9.81 / z0)
-        self.exp_wT = math.exp(self.omega0 * T)
-        self.bx_coef = T / (self.exp_wT - 1.0)
-        self.by_coef = lp / (self.exp_wT - 1.0)
+        # flat-ground limit: exp(ω₀·T), used when k=None or all k≈0
+        self.exp_wT_flat = math.exp(self.omega0 * T)
+        self.bx_coef_flat = T / (self.exp_wT_flat - 1.0)
+        self.by_coef_flat = lp / (self.exp_wT_flat - 1.0)
 
         # ---- Cost weights ----
         self.alpha_pos   = alpha_pos
@@ -128,6 +132,62 @@ class DCMFootholdPlanner:
     # -----------------------------------------------------------------------
     # Shared channel computation
     # -----------------------------------------------------------------------
+    def _compute_dcm_params(
+        self, k: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute per-environment DCM parameters for sloped terrain.
+
+        Given slope k, the CoM height varies linearly with time:
+            z(t) = k·t + z₀
+
+        The LIPM natural frequency becomes time-dependent:
+            ω(t) = √(g / z(t))
+
+        The integrated frequency σ(T) over swing time T:
+            σ(T) = ∫₀ᵀ ω(τ)dτ = 2√g · (√(kT+z₀) − √z₀) / k
+
+        The DCM amplifies by exp(σ(T)) over the swing phase.
+
+        When k → 0 (flat ground), σ(T) → ω₀·T where ω₀ = √(g/z₀).
+
+        Args:
+            k: (N,) per-environment slope (vertical velocity of CoM height).
+               k = 0  →  flat ground
+               k > 0  →  ascending (CoM rises)
+               k < 0  →  descending (CoM falls)
+
+        Returns:
+            exp_sigma:  (N,)  e^{σ(T)} — DCM amplification factor
+            exp_sigma_m1: (N,)  e^{σ(T)} − 1  (safe, clamped away from 0)
+        """
+        g = 9.81
+        sqrt_g = math.sqrt(g)
+        sqrt_z0 = math.sqrt(self.z0)
+
+        # Flat ground limit value: exp(ω₀·T)
+        exp_flat = self.exp_wT_flat
+
+        # Start with flat-ground default for all environments
+        exp_sigma = torch.full_like(k, exp_flat)
+
+        # Only compute sloped formula for non-flat environments (avoid 0/0)
+        non_flat = k.abs() > 1e-6
+        if torch.any(non_flat):
+            k_nf = k[non_flat]
+            kT_z0_nf = k_nf * self.T + self.z0
+            kT_z0_nf = torch.clamp(kT_z0_nf, min=1e-8)
+            sqrt_kT_z0_nf = torch.sqrt(kT_z0_nf)
+            sigma_T_nf = 2.0 * sqrt_g * (sqrt_kT_z0_nf - sqrt_z0) / k_nf
+            exp_sigma[non_flat] = torch.exp(sigma_T_nf)
+
+        # Clamp so exp_sigma ≠ 1 (avoid division by zero in b_nom)
+        exp_sigma = torch.clamp(exp_sigma, min=1.0 + 1e-6)
+        exp_sigma_m1 = exp_sigma - 1.0
+
+        return exp_sigma, exp_sigma_m1
+
+    # -----------------------------------------------------------------------
+
     def _compute_channels(
         self,
         heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
@@ -136,6 +196,7 @@ class DCMFootholdPlanner:
         swing_leg_sign: torch.Tensor,    # (N,) +-1
         com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
+        k: torch.Tensor | None = None,    # (N,) per-environment slope, None = all flat
     ) -> dict[str, torch.Tensor]:
         """Compute all intermediate cost channels.
 
@@ -213,26 +274,77 @@ class DCMFootholdPlanner:
         vy_map = vy.view(N, 1, 1)
         sgn_map = swing_leg_sign.view(N, 1, 1).float()
 
-        d_pos = (gx_map - vx_map * self.T) ** 2 + self.beta * (
-            gy_map - (vy_map * self.T + sgn_map * self.lp)) ** 2
+        # ---- Nominal step length and width (common to d_pos and b_nom) ----
+        L_nom = vx_map * self.T                        # (N,1,1)  = vx·T
+        W_nom = vy_map * self.T + sgn_map * self.lp    # (N,1,1)  = vy·T + (-1)ⁱ·l
+
+        d_pos = (gx_map - L_nom) ** 2 + self.beta * (gy_map - W_nom) ** 2
 
         # =================================================================
         # DCM residual d_dcm (Eq. 1 second term)
+        #
+        # DCM dynamics on variable-height LIPM:
+        #   ξ(t) = ξ₀ · exp(∫₀ᵗ ω(τ)dτ) = ξ₀ · e^{σ(t)}
+        #   where ω(τ) = √(g / z(τ))  and  z(τ) = k·τ + z₀
+        #
+        # σ(T) = 2√g · (√(kT+z₀) − √z₀) / k
+        #
+        # Nominal DCM offset (= desired distance from DCM target to foothold):
+        #   b_nom_x = vx·T / (e^{σ(T)} − 1)
+        #   b_nom_y = (-1)ⁱ·lₚ/(1+e^{σ(T)}) − (vy·T + (-1)ⁱ·lₚ)/(1−e^{σ(T)})
+        #
+        # DCM cost:
+        #   d_dcm = ‖ξ_T − p − b_nom‖²
         # =================================================================
-        bx = vx * self.bx_coef
-        by = swing_leg_sign.float() * self.by_coef
-        bx_map = bx.view(N, 1, 1)
-        by_map = by.view(N, 1, 1)
+        # _compute_dcm_params handles both flat and sloped internally
+        if k is not None:
+            exp_sigma, exp_sigma_m1 = self._compute_dcm_params(k)  # both (N,)
 
-        if com_local is not None and com_vel_local is not None:
-            xi_0_x = com_local[:, 0] + com_vel_local[:, 0] / self.omega0
-            xi_0_y = com_local[:, 1] + com_vel_local[:, 1] / self.omega0
-            xi_T_x = (xi_0_x * self.exp_wT).view(N, 1, 1)
-            xi_T_y = (xi_0_y * self.exp_wT).view(N, 1, 1)
-            d_dcm = ((xi_T_x - gx_map - bx_map) ** 2
-                     + (xi_T_y - gy_map - by_map) ** 2)
+            exp_sigma_exp = exp_sigma.view(N, 1, 1)
+            exp_sigma_m1_exp = exp_sigma_m1.view(N, 1, 1)
+            sgn_exp = swing_leg_sign.float().view(N, 1, 1)
+
+            # b_nom_x = vx·T / (e^{σ} − 1) = L_nom / (e^{σ}−1)
+            bx_map = L_nom / exp_sigma_m1_exp
+
+            # b_nom_y = (-1)ⁱ·lp/(1+e^{σ}) − W_nom/(1−e^{σ})
+            # Note: (1 − e^{σ}) = −(e^{σ} − 1), so:
+            #   = (-1)ⁱ·lp/(1+e^{σ}) + W_nom/(e^{σ}−1)
+            one_plus_exp = 1.0 + exp_sigma_exp
+            by_map = (sgn_exp * self.lp) / one_plus_exp + W_nom / exp_sigma_m1_exp
+
+            # ξ_T = ξ₀ · e^{σ(T)}
+            if com_local is not None and com_vel_local is not None:
+                xi_0_x = com_local[:, 0] + com_vel_local[:, 0] / self.omega0
+                xi_0_y = com_local[:, 1] + com_vel_local[:, 1] / self.omega0
+                xi_T_x = (xi_0_x * exp_sigma).view(N, 1, 1)
+                xi_T_y = (xi_0_y * exp_sigma).view(N, 1, 1)
+            else:
+                # Fallback: no CoM state → d_dcm reduces to position norm
+                xi_T_x = gx_map + bx_map
+                xi_T_y = gy_map + by_map
         else:
-            d_dcm = (gx_map - bx_map) ** 2 + (gy_map - by_map) ** 2
+            # ---- k is None → all environments are flat ----
+            sgn_exp = swing_leg_sign.float().view(N, 1, 1)
+
+            # b_nom_x = L_nom / (e^{ω₀·T}−1)   (= vx · bx_coef_flat)
+            bx_map = L_nom / (self.exp_wT_flat - 1.0)
+
+            one_plus_exp_flat = 1.0 + self.exp_wT_flat
+            by_map = (sgn_exp * self.lp) / one_plus_exp_flat + W_nom / (self.exp_wT_flat - 1.0)
+
+            # ξ_T = ξ₀ · e^{ω₀·T}
+            if com_local is not None and com_vel_local is not None:
+                xi_0_x = com_local[:, 0] + com_vel_local[:, 0] / self.omega0
+                xi_0_y = com_local[:, 1] + com_vel_local[:, 1] / self.omega0
+                xi_T_x = (xi_0_x * self.exp_wT_flat).view(N, 1, 1)
+                xi_T_y = (xi_0_y * self.exp_wT_flat).view(N, 1, 1)
+            else:
+                xi_T_x = gx_map + bx_map
+                xi_T_y = gy_map + by_map
+
+        d_dcm = ((xi_T_x - gx_map - bx_map) ** 2
+                 + (xi_T_y - gy_map - by_map) ** 2)
 
         # =================================================================
         # Total cost (Eq. 1)
@@ -263,11 +375,12 @@ class DCMFootholdPlanner:
         swing_leg_sign: torch.Tensor,    # (N,) +-1
         com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
+        k: torch.Tensor | None = None,    # (N,) per-environment slope, None = all flat
     ) -> torch.Tensor:
         """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
         channels = self._compute_channels(
             heightmap, v_cmd, stance_xyz_local, swing_leg_sign,
-            com_local, com_vel_local,
+            com_local, com_vel_local, k=k,
         )
         return self._argmin(channels['J'], channels['h_safe'],
                             v_cmd[:, 0].abs(), stance_xyz_local)[0]
@@ -315,6 +428,7 @@ class DCMFootholdPlanner:
         swing_leg_sign: torch.Tensor,    # (N,) +-1
         com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
+        k: torch.Tensor | None = None,    # (N,) per-environment slope, None = all flat
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Returns (p_star, channels) where channels contains all intermediate costs.
 
@@ -323,7 +437,7 @@ class DCMFootholdPlanner:
         """
         channels = self._compute_channels(
             heightmap, v_cmd, stance_xyz_local, swing_leg_sign,
-            com_local, com_vel_local,
+            com_local, com_vel_local, k=k,
         )
         p_star, best_idx = self._argmin(channels['J'], channels['h_safe'],
                                          v_cmd[:, 0].abs(), stance_xyz_local)
@@ -340,6 +454,7 @@ class DCMFootholdPlanner:
         swing_leg_sign: torch.Tensor,       # (N,)
         com_pos_w: torch.Tensor | None = None,   # (N, 3) CoM world pos
         com_vel_w: torch.Tensor | None = None,   # (N, 3) CoM world vel
+        k: torch.Tensor | None = None,      # (N,) per-environment slope
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute best foothold in world frame + return all cost channels.
 
@@ -366,7 +481,7 @@ class DCMFootholdPlanner:
         # -- Plan in pelvis-local frame --
         p_local, channels = self.plan_with_channels(
             heightmap, v_local, stance_local,
-            swing_leg_sign, com_local, com_vel_local,
+            swing_leg_sign, com_local, com_vel_local, k=k,
         )
 
         # -- Rotate back: pelvis-local -> world --
@@ -388,6 +503,7 @@ class DCMFootholdPlanner:
         swing_leg_sign: torch.Tensor,       # (N,)
         com_pos_w: torch.Tensor | None = None,   # (N, 3) CoM world pos
         com_vel_w: torch.Tensor | None = None,   # (N, 3) CoM world vel
+        k: torch.Tensor | None = None,      # (N,) per-environment slope
     ) -> torch.Tensor:
         """Compute best foothold in world frame."""
         N = root_pos_w.shape[0]
@@ -409,7 +525,7 @@ class DCMFootholdPlanner:
         # -- Plan in pelvis-local frame --
         p_local = self.plan(
             heightmap, v_local, stance_local,
-            swing_leg_sign, com_local, com_vel_local,
+            swing_leg_sign, com_local, com_vel_local, k=k,
         )
 
         # -- Rotate back: pelvis-local -> world --
