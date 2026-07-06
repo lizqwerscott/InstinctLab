@@ -39,6 +39,12 @@ class InstinctRlActorCriticRecurrentCfg(InstinctRlActorCriticCfg):
     rnn_num_layers: int = 1
     """The number of layers in the RNN."""
 
+    rnn_highway: bool = False
+    """Whether to add a highway output gate around the RNN (CReF Eq. 15-16):
+    the RNN input is linearly projected to the hidden size and blended with the
+    RNN output through a per-channel sigmoid gate, giving the policy a
+    feedforward bypass when the hidden state is unreliable."""
+
     multireward_multirnn: bool = False
     """Whether to use multiple RNN critics for multiple rewards."""
 

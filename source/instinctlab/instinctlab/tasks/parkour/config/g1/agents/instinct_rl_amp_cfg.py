@@ -4,6 +4,7 @@ from isaaclab.utils import configclass
 
 from instinctlab.utils.wrappers.instinct_rl import (
     InstinctRlConv2dHeadCfg,
+    InstinctRlCrossAttnHeadCfg,
     InstinctRlMlpCfg,
     InstinctRlEncoderMoEActorCriticCfg,
     InstinctRlEncoderMoEActorCriticRecurrentCfg,
@@ -29,6 +30,42 @@ class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
 
 
 @configclass
+class DepthCrossAttnCfg(InstinctRlCrossAttnHeadCfg):
+    """Proprioception-queried cross-attention depth encoder.
+
+    Replaces the flatten+MLP Conv2d encoder: conv tokenizer -> self-attention over
+    depth tokens -> cross-attention with a proprioceptive query. Only depth_image
+    is taken out; the proprio components below still flow to the GRU.
+    """
+
+    output_size = 128
+    channels = [32, 64, 128]  # channels[-1] = d_model, must be divisible by num_heads
+    kernel_sizes = [3, 3, 3]
+    strides = [2, 2, 2]
+    paddings = [1, 1, 1]
+    num_heads = 4
+    num_self_attn_layers = 1
+    ffn_expansion = 2
+    # proprio -> query MLP hidden widths (output is always d_model=channels[-1]).
+    # None => [channels[-1] * ffn_expansion] = [256]. e.g. [256, 256] for a deeper query MLP.
+    info_hidden_sizes = None
+    nonlinearity = "ELU"
+    use_maxpool = False
+    component_names = [
+        "depth_image",
+    ]
+    takeout_input_components = True
+    info_component_names = [
+        "base_ang_vel",
+        "projected_gravity",
+        "velocity_commands",
+        "joint_pos_rel",
+        "joint_vel_rel",
+        "last_action",
+    ]
+
+
+@configclass
 class HeightScanEncoderMlpCfg(InstinctRlMlpCfg):
     output_size = 128
     hidden_sizes = [512, 256]
@@ -39,7 +76,9 @@ class HeightScanEncoderMlpCfg(InstinctRlMlpCfg):
 
 @configclass
 class EncoderDepthConfigs:
-    depth_image_encoder = DepthEncoderConv2dCfg()
+    # A/B switch: DepthEncoderConv2dCfg() for the flatten+MLP baseline,
+    # DepthCrossAttnCfg() for the proprioception-queried cross-attention encoder.
+    depth_image_encoder = DepthCrossAttnCfg()
 
 @configclass
 class EncoderConfigs:
@@ -121,20 +160,10 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     num_mini_batches = 4
     learning_rate = 1e-3
 
-    # lr_scheduler_class_name = "OneCycleLR"
-    # lr_scheduler: dict = {
-    #     "max_lr": 2.0e-3,
-    #     "total_steps": 30000,
-    #     "div_factor": 2.0,
-    #     "final_div_factor": 100.0,
-    #     "pct_start": 0.0167,
-    #     "three_phase": True,
-    #     "cycle_momentum": False,
-    # }
     lr_scheduler_class_name = "CosineAnnealingLR"
     lr_scheduler: dict = {
-        "T_max": 30000,      # 必须等于 scheduler.step() 总次数
-        "eta_min": 1.0e-5,   # 终点最小 lr,可调
+        "T_max": 30000,
+        "eta_min": 1.0e-5,
     }
 
     teacher_act_prob = "linear"
@@ -201,9 +230,6 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     clip_param = 0.2
     entropy_coef = 0.006
     denoise_loss_coef = 0.1
-    # num_learning_epochs = 5
-    # num_mini_batches = 4
-    # learning_rate = 1.0e-3
     schedule = "adaptive"
     gamma = 0.99
     lam = 0.95

@@ -65,6 +65,62 @@ class InstinctRlConv2dHeadCfg(InstinctRlParallelBlockCfg):
 
 
 @configclass
+class InstinctRlCrossAttnHeadCfg(InstinctRlParallelBlockCfg):
+    """Configuration for the proprioception-queried cross-attention depth encoder.
+
+    The block tokenizes ``component_names`` (a single image component) with a conv
+    stack, runs self-attention over the tokens, then cross-attends with a query
+    built from ``info_component_names`` (the proprioceptive components). Only the
+    image component is taken out of the obs; the info components still flow to the
+    downstream network.
+    """
+
+    class_name: str = "CrossAttnFuseHeadModel"
+    """The class name. Default is CrossAttnFuseHeadModel."""
+
+    info_component_names: List[str] = MISSING
+    """The proprioceptive components used to build the cross-attention query."""
+
+    channels: List[int] = MISSING
+    """The number of channels per conv layer. channels[-1] is the token dim (d_model)."""
+
+    kernel_sizes: List[int] = MISSING
+    """The size of the kernel per conv layer."""
+
+    strides: List[int] = MISSING
+    """The stride per conv layer."""
+
+    paddings: List[int] = MISSING
+    """The padding per conv layer."""
+
+    num_heads: int = 4
+    """The number of attention heads. channels[-1] must be divisible by this."""
+
+    num_self_attn_layers: int = 1
+    """The number of stacked self-attention layers over the image tokens.
+    0 skips self-attention (tokenizer -> LN -> K/V, the exact CReF form)."""
+
+    ffn_expansion: int = 2
+    """Hidden-size multiplier for the self-attention FFN."""
+
+    info_hidden_sizes: list[int] | None = None
+    """Hidden layer widths of the proprioceptive query MLP (info -> query token).
+    The output is always d_model. None defaults to [d_model * ffn_expansion]."""
+
+    use_grf: bool = False
+    """Whether to apply CReF's Gated Residual Fusion (Eq. 12-14) on the
+    concatenated [proprio token ; attended depth token] (dim 2 * d_model)
+    before the output projection. With output_size == 2 * d_model the fused
+    token passes through unprojected (the exact CReF form)."""
+
+    nonlinearity: str = "ELU"
+    """The activation function for the conv/FFN/info-projection."""
+
+    use_maxpool: bool = False
+    """Whether the conv tokenizer uses max pooling for downsampling."""
+
+
+@configclass
 class InstinctRlTransformerHeadCfg(InstinctRlParallelBlockCfg):
     """Configuration for the Transformer encoder network."""
 
