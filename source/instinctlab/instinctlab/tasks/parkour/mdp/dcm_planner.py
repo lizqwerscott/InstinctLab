@@ -68,7 +68,7 @@ class DCMFootholdPlanner:
         # LIPM
         z0: float = 0.82,
         T: float = 0.45,
-        lp: float = 0.12,
+        lp: float = 0.20,
         # Footprint kernel (in cells)
         fp_h: int = 2,
         fp_w: int = 5,
@@ -76,7 +76,7 @@ class DCMFootholdPlanner:
         alpha_pos:   float = 1.0,
         alpha_dcm:   float = 0.5,
         alpha_E:     float = 0.6,
-        alpha_Q:     float = 20.0,
+        alpha_Q:     float = 10.0,
         alpha_M:     float = 6.0,
         alpha_climb: float = 1.5,
         beta:        float = 2.5,
