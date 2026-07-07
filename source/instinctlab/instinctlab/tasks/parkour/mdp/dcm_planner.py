@@ -17,7 +17,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply_inverse, quat_apply_yaw
 
 
 # ---------------------------------------------------------------------------
@@ -528,8 +528,6 @@ class DCMFootholdPlanner:
             swing_leg_sign, com_local, com_vel_local, k=k,
         )
 
-        # -- Rotate back: pelvis-local -> world --
-        q_conj = root_quat_w.clone()
-        q_conj[:, 1:] *= -1.0  # conjugate: quat_apply_inverse(q*, v) == quat_apply(q, v)
-        p_world = quat_apply_inverse(q_conj, p_local) + root_pos_w
+        # -- Rotate back: pelvis-local -> world (yaw-only, matching heightmap) --
+        p_world = quat_apply_yaw(root_quat_w, p_local) + root_pos_w
         return p_world
