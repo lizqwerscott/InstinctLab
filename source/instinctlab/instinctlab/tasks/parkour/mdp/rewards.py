@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import isaaclab.sim as sim_utils
 import omni.kit.app
+import numpy as np
 import torch
 from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -233,6 +234,10 @@ class FootholdProximityReward(ManagerTermBase):
         foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
         self._foot_order: list[str] = [foot_names[i] for i in self._asset_cfg.body_ids]
 
+        # ---- Optional terrain-specific gating --------------------------------
+        self._terrain_names = cfg.params.get("terrain_names", None)
+        self._terrain_mask = None
+
         # ---- Debug visualisation ----
         self._debug_vis = cfg.params.get("debug_vis", False)
         self._debug_vis_handle = None
@@ -365,6 +370,7 @@ class FootholdProximityReward(ManagerTermBase):
         asset_cfg=None,
         sensor_cfg=None,
         heightmap_sensor_cfg=None,
+        terrain_names=None,
     ) -> torch.Tensor:
         """Compute foothold proximity reward.
 
@@ -490,7 +496,13 @@ class FootholdProximityReward(ManagerTermBase):
         has_lin_vel = torch.norm(vel_cmd_full[:, :2], dim=1) > 0.05      # (N,)
         reward = torch.where(has_lin_vel, reward, reward * 0.0)
 
-        # ---- 4d. Persist filtered contact for next frame -----------------
+        # ---- 4d'. Terrain-specific gating ---------------------------------
+        if self._terrain_names is not None:
+            self._update_terrain_mask(env)
+            if self._terrain_mask is not None:
+                reward = reward * self._terrain_mask
+
+        # ---- 4e. Persist filtered contact for next frame -----------------
         self._was_in_contact = in_contact_smooth
 
         # ---- 4e. Cache frame data for _debug_vis_callback -----------------
@@ -540,11 +552,18 @@ class FootholdProximityReward(ManagerTermBase):
         if self._foothold_visualizer is not None:
             n = self._p_star_cache.shape[0]
             if n > 0:
-                # _p_star_cache: (N, 2, 3) -> (2, N, 3) -> (2*N, 3)
-                poses = self._p_star_cache.permute(1, 0, 2).reshape(-1, 3)
-                marker_indices = torch.zeros(2 * n, dtype=torch.int, device=self._p_star_cache.device)
-                marker_indices[n:] = 1  # right foot -> green
-                self._foothold_visualizer.visualize(poses, marker_indices=marker_indices)
+                vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+                if vis_mask is not None:
+                    p_star = self._p_star_cache[vis_mask]              # (M, 2, 3)
+                else:
+                    p_star = self._p_star_cache                       # (N, 2, 3)
+                if p_star.shape[0] > 0:
+                    # (M, 2, 3) -> (2, M, 3) -> (2*M, 3)
+                    poses = p_star.permute(1, 0, 2).reshape(-1, 3)
+                    m = p_star.shape[0]
+                    marker_indices = torch.zeros(2 * m, dtype=torch.int, device=p_star.device)
+                    marker_indices[m:] = 1  # right foot -> green
+                    self._foothold_visualizer.visualize(poses, marker_indices=marker_indices)
 
         # ---- DCM cost heatmap ----
         if self._cost_visualizer is not None and self._channels_left is not None and self._channels_right is not None:
@@ -586,70 +605,93 @@ class FootholdProximityReward(ManagerTermBase):
 
         # ---- Contact state discs (slightly below foot, red=stance, blue=swing) ----
         if hasattr(self, '_contact_vis') and self._contact_vis is not None:
-            foot_pos_ground = self._last_body_pos.clone()
-            foot_pos_ground[:, :, 2] -= 0.02  # place slightly below foot
-            poses_flat = foot_pos_ground.reshape(-1, 3)  # (N*2, 3)
-            # marker: 0=contact(red), 1=swing(blue); invert boolean so True→0, False→1
-            contact_flat = (~self._last_contact).reshape(-1).long()  # (N*2,)
-            self._contact_vis.visualize(
-                translations=poses_flat,
-                marker_indices=contact_flat,
-            )
+            vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+            if vis_mask is not None:
+                foot_pos = self._last_body_pos[vis_mask]
+                last_contact = self._last_contact[vis_mask]
+            else:
+                foot_pos = self._last_body_pos
+                last_contact = self._last_contact
+            if foot_pos.shape[0] > 0:
+                foot_pos_ground = foot_pos.clone()
+                foot_pos_ground[:, :, 2] -= 0.02  # place slightly below foot
+                poses_flat = foot_pos_ground.reshape(-1, 3)  # (M*2, 3)
+                contact_flat = (~last_contact).reshape(-1).long()  # (M*2,)
+                self._contact_vis.visualize(
+                    translations=poses_flat,
+                    marker_indices=contact_flat,
+                )
 
         # ---- Foot->target lines (white cylinders from foot to p_star_cache) ----
         if hasattr(self, '_foot_target_line_vis') and self._foot_target_line_vis is not None:
-            dirs = self._p_star_cache - self._last_body_pos  # (N, 2, 3)
-            lengths = torch.norm(dirs, dim=-1)  # (N, 2)
-            valid_mask = lengths > 0.01
-            valid_flat = valid_mask.reshape(-1)  # (N*2,)
-            if valid_flat.any():
-                foot_flat = self._last_body_pos.reshape(-1, 3)[valid_flat]
-                target_flat = self._p_star_cache.reshape(-1, 3)[valid_flat]
-                dir_flat = dirs.reshape(-1, 3)[valid_flat]
-                len_flat = lengths.reshape(-1)[valid_flat]
-                mid_flat = (foot_flat + target_flat) * 0.5
-                orient_flat = self._quat_from_z_to_dir(dir_flat)
-                scales_flat = torch.ones_like(mid_flat)
-                scales_flat[:, 2] = len_flat
-                self._foot_target_line_vis.visualize(
-                    translations=mid_flat,
-                    orientations=orient_flat,
-                    scales=scales_flat,
-                    marker_indices=torch.zeros(valid_flat.sum(), dtype=torch.int, device=dir_flat.device),
-                )
+            vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+            if vis_mask is not None:
+                p_star = self._p_star_cache[vis_mask]       # (M, 2, 3)
+                body_pos = self._last_body_pos[vis_mask]    # (M, 2, 3)
             else:
-                self._foot_target_line_vis.visualize(translations=None)
+                p_star = self._p_star_cache
+                body_pos = self._last_body_pos
+            if body_pos.shape[0] > 0:
+                dirs = p_star - body_pos  # (M, 2, 3)
+                lengths = torch.norm(dirs, dim=-1)  # (M, 2)
+                valid_mask = lengths > 0.01
+                valid_flat = valid_mask.reshape(-1)  # (M*2,)
+                if valid_flat.any():
+                    foot_flat = body_pos.reshape(-1, 3)[valid_flat]
+                    target_flat = p_star.reshape(-1, 3)[valid_flat]
+                    dir_flat = dirs.reshape(-1, 3)[valid_flat]
+                    len_flat = lengths.reshape(-1)[valid_flat]
+                    mid_flat = (foot_flat + target_flat) * 0.5
+                    orient_flat = self._quat_from_z_to_dir(dir_flat)
+                    scales_flat = torch.ones_like(mid_flat)
+                    scales_flat[:, 2] = len_flat
+                    self._foot_target_line_vis.visualize(
+                        translations=mid_flat,
+                        orientations=orient_flat,
+                        scales=scales_flat,
+                        marker_indices=torch.zeros(valid_flat.sum(), dtype=torch.int, device=dir_flat.device),
+                    )
+                else:
+                    self._foot_target_line_vis.visualize(translations=None)
 
         # ---- Event flash markers (yellow=swing_onset, white=touchdown) ----
         if hasattr(self, '_event_vis') and self._event_vis is not None:
-            event_positions = []
-            event_indices = []
-            for foot_idx in range(2):
-                # Swing onset timer columns: 0 for left, 2 for right
-                swing_timer = self._event_timer[:, foot_idx * 2]
-                swing_active = swing_timer > 0
-                if swing_active.any():
-                    event_positions.append(self._last_body_pos[swing_active, foot_idx])
-                    event_indices.append(
-                        torch.zeros(swing_active.sum(), dtype=torch.int, device=swing_timer.device)
-                    )
-                # Touchdown timer columns: 1 for left, 3 for right
-                td_timer = self._event_timer[:, foot_idx * 2 + 1]
-                td_active = td_timer > 0
-                if td_active.any():
-                    event_positions.append(self._last_body_pos[td_active, foot_idx])
-                    event_indices.append(
-                        torch.ones(td_active.sum(), dtype=torch.int, device=td_timer.device)
-                    )
-            if event_positions:
-                all_pos = torch.cat(event_positions, dim=0)
-                all_idx = torch.cat(event_indices, dim=0)
-                self._event_vis.visualize(
-                    translations=all_pos,
-                    marker_indices=all_idx,
-                )
+            vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+            if vis_mask is not None:
+                event_timer = self._event_timer[vis_mask]
+                body_pos = self._last_body_pos[vis_mask]
             else:
-                self._event_vis.visualize(translations=None)
+                event_timer = self._event_timer
+                body_pos = self._last_body_pos
+            if body_pos.shape[0] > 0:
+                event_positions = []
+                event_indices = []
+                for foot_idx in range(2):
+                    # Swing onset timer columns: 0 for left, 2 for right
+                    swing_timer = event_timer[:, foot_idx * 2]
+                    swing_active = swing_timer > 0
+                    if swing_active.any():
+                        event_positions.append(body_pos[swing_active, foot_idx])
+                        event_indices.append(
+                            torch.zeros(swing_active.sum(), dtype=torch.int, device=swing_timer.device)
+                        )
+                    # Touchdown timer columns: 1 for left, 3 for right
+                    td_timer = event_timer[:, foot_idx * 2 + 1]
+                    td_active = td_timer > 0
+                    if td_active.any():
+                        event_positions.append(body_pos[td_active, foot_idx])
+                        event_indices.append(
+                            torch.ones(td_active.sum(), dtype=torch.int, device=td_timer.device)
+                        )
+                if event_positions:
+                    all_pos = torch.cat(event_positions, dim=0)
+                    all_idx = torch.cat(event_indices, dim=0)
+                    self._event_vis.visualize(
+                        translations=all_pos,
+                        marker_indices=all_idx,
+                    )
+                else:
+                    self._event_vis.visualize(translations=None)
 
 
     # ------------------------------------------------------------------
@@ -670,6 +712,41 @@ class FootholdProximityReward(ManagerTermBase):
         self._swing_planned[env_ids] = False
         if hasattr(self, '_event_timer'):
             self._event_timer[env_ids] = 0
+        self._terrain_mask = None
+
+    # ------------------------------------------------------------------
+    def _update_terrain_mask(self, env: "ManagerBasedRLEnv"):
+        """Compute and cache (N,) bool mask for terrain-name gating.
+
+        Column-to-sub-terrain mapping is derived from the relative proportions
+        defined in the terrain-generator config.  The mask is recomputed
+        on the first call and after every reset.
+        """
+        terrain = env.scene["terrain"]
+        cfg = terrain.cfg.terrain_generator
+        sub_names = list(cfg.sub_terrains.keys())
+        proportions = np.array(
+            [cfg.sub_terrains[n].proportion for n in sub_names],
+            dtype=np.float64,
+        )
+        proportions /= np.sum(proportions)
+
+        sub_indices = np.empty(cfg.num_cols, dtype=np.int32)
+        cumsum = np.cumsum(proportions)
+        for col in range(cfg.num_cols):
+            sub_indices[col] = int(
+                np.min(np.where(col / cfg.num_cols + 0.001 < cumsum)[0])
+            )
+
+        mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        for name in self._terrain_names:
+            if name not in sub_names:
+                continue
+            type_idx = sub_names.index(name)
+            for col_idx in np.where(sub_indices == type_idx)[0]:
+                env_ids = torch.where(terrain.terrain_types == col_idx)[0]
+                mask[env_ids] = True
+        self._terrain_mask = mask
 
     # ------------------------------------------------------------------
     def _get_heightmap(self, env: "ManagerBasedRLEnv", root_pos: torch.Tensor) -> torch.Tensor:

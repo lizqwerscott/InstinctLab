@@ -722,6 +722,7 @@ class G1Rewards:
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "debug_vis": False,
+            "terrain_names": ["pyramid_stairs", "pyramid_stairs_inv", "up_down", "down_up"],
         },
     )
 
