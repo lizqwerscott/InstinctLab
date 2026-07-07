@@ -424,8 +424,8 @@ class FootholdProximityReward(ManagerTermBase):
         k = k * torch.ones(env.num_envs, device=env.device)
 
         # ---- 3b. Cache update: plan ONLY at swing onset for each foot ----
-        # Left foot swing onset  → plan left-foot target (stance = right foot, sign = -1)
-        # Right foot swing onset → plan right-foot target (stance = left foot, sign = +1)
+        # Left foot swing onset  → plan left-foot target (stance = right foot, sign = +1)
+        # Right foot swing onset → plan right-foot target (stance = left foot, sign = -1)
         for foot_idx in range(2):
             mask = swing_onset[:, foot_idx]
             if mask.any():
@@ -433,7 +433,7 @@ class FootholdProximityReward(ManagerTermBase):
                     p_new = self._planner.plan_in_world(
                         heightmap[mask], v_cmd[mask], body_pos[mask, 1],
                         root_pos[mask], root_quat[mask],
-                        -torch.ones(mask.sum(), device=env.device),
+                        torch.ones(mask.sum(), device=env.device),
                         com_pos_w=com_pos_w[mask], com_vel_w=com_vel_w[mask],
                         k=k[mask],
                     )
@@ -442,7 +442,7 @@ class FootholdProximityReward(ManagerTermBase):
                     p_new = self._planner.plan_in_world(
                         heightmap[mask], v_cmd[mask], body_pos[mask, 0],
                         root_pos[mask], root_quat[mask],
-                        torch.ones(mask.sum(), device=env.device),
+                        -torch.ones(mask.sum(), device=env.device),
                         com_pos_w=com_pos_w[mask], com_vel_w=com_vel_w[mask],
                         k=k[mask],
                     )
@@ -453,13 +453,13 @@ class FootholdProximityReward(ManagerTermBase):
         if self._debug_vis and self._cost_visualizer is not None:
             p_left_swing_vis, self._channels_left = self._planner.plan_with_channels_in_world(
                 heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
-                -torch.ones(env.num_envs, device=env.device),
+                torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
                 k=k,
             )
             p_right_swing_vis, self._channels_right = self._planner.plan_with_channels_in_world(
                 heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
-                torch.ones(env.num_envs, device=env.device),
+                -torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
                 k=k,
             )
