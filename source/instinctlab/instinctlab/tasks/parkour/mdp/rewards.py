@@ -209,7 +209,24 @@ class FootholdProximityReward(ManagerTermBase):
         # avoid rendering spheres at the world origin (0,0,0).
         self._p_star_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
         self._p_star_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        # Previous-frame filtered contact state (used for rising-edge detection).
+        # Initialised all-True so the first swing_onset is reliable.
         self._was_in_contact = torch.ones(env.num_envs, 2, dtype=torch.bool, device=env.device)
+
+        # ---- Phase-state machine for swing-leg tracking -------------------
+        # True  = left  leg is the swing leg (right leg is stance)
+        # False = right leg is the swing leg (left  leg is stance)
+        # Initialised to left-swing by default; reset() can randomise.
+        self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+        # Exponential-moving-average filter for raw contact signals.
+        # Smoothing prevents spurious phase switches from force noise.
+        self._contact_filtered = torch.ones(env.num_envs, 2, dtype=torch.float32, device=env.device)
+
+        # Step counter while *both* feet are in contact AND a non-zero
+        # linear velocity is commanded (used for a decaying stand-to-walk
+        # bonus that helps the agent pick a foot to break symmetry).
+        self._double_support_steps = torch.zeros(env.num_envs, dtype=torch.int, device=env.device)
 
         # Resolve foot order by name (for correct left/right assignment)
         foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
@@ -283,7 +300,7 @@ class FootholdProximityReward(ManagerTermBase):
         """
         asset = env.scene[self._asset_cfg.name]
 
-        # ---- 1. Foot positions & contact ---------------------------------
+        # ---- 1. Foot positions & contact (raw) --------------------------
         body_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3)
 
         contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
@@ -291,84 +308,127 @@ class FootholdProximityReward(ManagerTermBase):
         contact_norm = torch.norm(
             net_force[:, -1, self._sensor_cfg.body_ids], dim=-1       # (N, 2)
         )
-        in_contact = contact_norm > 1.0                               # (N, 2)
+        in_contact = contact_norm > 1.0                               # (N, 2) raw
 
-        # ---- 2. Swing onset detection per foot ---------------------------
-        swing_onset = (~in_contact) & self._was_in_contact             # (N, 2)
+        # ---- 2a. Contact-signal EMA filter (avoids oscillation) ----------
+        contact_alpha = 0.85
+        self._contact_filtered = (
+            contact_alpha * self._contact_filtered
+            + (1.0 - contact_alpha) * in_contact.float()
+        )
+        in_contact_smooth = self._contact_filtered > 0.3              # (N, 2)
 
-        # ---- 3. Re-plan at swing onset for each foot ---------------------
+        # ---- 2b. Swing-onset detection (rising edge on filtered signal) ---
+        swing_onset = (~in_contact_smooth) & self._was_in_contact      # (N, 2)
+
+        # ---- 2c. Phase-state update --------------------------------------
+        # When a foot loses contact it becomes the new swing leg.
+        #   swing_onset[:, 0] == True  → left foot just lifted  → phase_left=True
+        #   swing_onset[:, 1] == True  → right foot just lifted → phase_left=False
+        envs_to_swap = swing_onset[:, 0] | swing_onset[:, 1]
+        new_phase = swing_onset[:, 0]  # True if left onset, False if right onset
+        self._phase_left_swing = torch.where(
+            envs_to_swap, new_phase, self._phase_left_swing
+        )
+
+        # ---- 3. Common quantities (shared by planning & reward) ----------
         root_pos = asset.data.root_pos_w                               # (N, 3)
         root_quat = asset.data.root_quat_w                             # (N, 4) w,x,y,z
         v_cmd = env.command_manager.get_command("base_velocity")[:, :2]  # (N, 2) world
         heightmap = self._get_heightmap(env, root_pos)                 # (N, 25, 37)
 
-        # [FIX] Approximate CoM state from root (pelvis) state.
-        # For a well-designed humanoid the pelvis is close to the CoM;
-        # if you have explicit CoM data (e.g. from a rigid-body API),
-        # pass that instead for better accuracy.
+        # Approximate CoM state from root (pelvis) state.
         com_pos_w = root_pos                                          # (N, 3)
         com_vel_w = asset.data.root_lin_vel_w                          # (N, 3)
 
-        # Pre-compute both scenarios (fully batched on GPU)
-        #   Left-swing  → stance = right foot (index 1), sign = -1
-        #   Right-swing → stance = left foot  (index 0), sign = +1
-
         # ---- 3a. Lazy-init p_star_cache with actual foot positions -------
-        # Without this, the cache stays at (0,0,0) and foothold spheres
-        # render underground until the first swing onset is detected.
         newly_uninitialized = ~self._p_star_initialized
         if newly_uninitialized.any():
             self._p_star_cache[newly_uninitialized, 0] = body_pos[newly_uninitialized, 0]
             self._p_star_cache[newly_uninitialized, 1] = body_pos[newly_uninitialized, 1]
             self._p_star_initialized[newly_uninitialized] = True
 
-
         k = 0.15 / 0.45  # stair height / max stair height to climb
         k = k * torch.ones(env.num_envs, device=env.device)
 
-        # ---+ Cost-channel visualisation: store channels for _debug_vis_callback ---
+        # ---- 3b. Cache update: plan ONLY at swing onset for each foot ----
+        # Left foot swing onset  → plan left-foot target (stance = right foot, sign = -1)
+        # Right foot swing onset → plan right-foot target (stance = left foot, sign = +1)
+        for foot_idx in range(2):
+            mask = swing_onset[:, foot_idx]
+            if mask.any():
+                if foot_idx == 0:  # left foot
+                    p_new = self._planner.plan_in_world(
+                        heightmap[mask], v_cmd[mask], body_pos[mask, 1],
+                        root_pos[mask], root_quat[mask],
+                        -torch.ones(mask.sum(), device=env.device),
+                        com_pos_w=com_pos_w[mask], com_vel_w=com_vel_w[mask],
+                        k=k[mask],
+                    )
+                    self._p_star_cache[mask, 0] = p_new
+                else:  # right foot
+                    p_new = self._planner.plan_in_world(
+                        heightmap[mask], v_cmd[mask], body_pos[mask, 0],
+                        root_pos[mask], root_quat[mask],
+                        torch.ones(mask.sum(), device=env.device),
+                        com_pos_w=com_pos_w[mask], com_vel_w=com_vel_w[mask],
+                        k=k[mask],
+                    )
+                    self._p_star_cache[mask, 1] = p_new
+
+        # -- Cost-channel visualisation (full planning each frame, cache NOT updated) --
         if self._debug_vis and self._cost_visualizer is not None:
-            p_left_swing, self._channels_left = self._planner.plan_with_channels_in_world(
+            p_left_swing_vis, self._channels_left = self._planner.plan_with_channels_in_world(
                 heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
                 -torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
                 k=k,
-            )  # (N, 3), dict
-            p_right_swing, self._channels_right = self._planner.plan_with_channels_in_world(
+            )
+            p_right_swing_vis, self._channels_right = self._planner.plan_with_channels_in_world(
                 heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
                 torch.ones(env.num_envs, device=env.device),
                 com_pos_w=com_pos_w, com_vel_w=com_vel_w,
                 k=k,
-            )  # (N, 3), dict
+            )
             self._last_heightmap = heightmap
             self._last_root_pos = root_pos
             self._last_root_quat = root_quat
-        else:
-            p_left_swing = self._planner.plan_in_world(
-                heightmap, v_cmd, body_pos[:, 1], root_pos, root_quat,
-                -torch.ones(env.num_envs, device=env.device),
-                com_pos_w=com_pos_w, com_vel_w=com_vel_w,
-                k=k,
-            )  # (N, 3)
-            p_right_swing = self._planner.plan_in_world(
-                heightmap, v_cmd, body_pos[:, 0], root_pos, root_quat,
-                torch.ones(env.num_envs, device=env.device),
-                com_pos_w=com_pos_w, com_vel_w=com_vel_w,
-                k=k,
-            )  # (N, 3)
 
-        # Always update foothold targets for both feet every frame.
-        # Reward is masked by ~in_contact below, so only airborne feet
-        # contribute to the loss — but the planner runs every step regardless.
-        self._p_star_cache[:, 0] = p_left_swing
-        self._p_star_cache[:, 1] = p_right_swing
+        # ---- 4. Reward ---------------------------------------------------
+        # ---- 4a. Velocity-condition gate --------------------------------
+        vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
+        has_lin_vel = torch.norm(vel_cmd_full[:, :2], dim=1) > 0.05      # (N,)
 
-        self._was_in_contact = in_contact
+        # ---- 4b. Swing-leg Gaussian proximity ---------------------------
+        swing_foot_idx = torch.where(self._phase_left_swing, 0, 1)       # (N,) 0 or 1
+        dist_sq = ((body_pos - self._p_star_cache) ** 2).sum(dim=-1)    # (N, 2)
+        gauss = torch.exp(-sigma_p * dist_sq)                            # (N, 2)
+        swing_gauss = gauss[torch.arange(env.num_envs, device=env.device), swing_foot_idx]  # (N,)
 
-        # ---- 4. Reward: Gaussian proximity per swinging foot -------------
-        dist_sq = ((body_pos - self._p_star_cache) ** 2).sum(dim=-1)   # (N, 2)
-        swing_mask = (~in_contact).float()                              # (N, 2)
-        return (swing_mask * torch.exp(-sigma_p * dist_sq)).sum(dim=-1)  # (N,)
+        # Only environments with a linear-velocity command receive the
+        # proximity reward (pure rotation or stand-still should NOT
+        # incentivise stepping).
+        reward = torch.zeros(env.num_envs, device=env.device)
+        reward = torch.where(has_lin_vel, swing_gauss, reward)
+
+        # ---- 4c. Double-support bonus (decaying, only when has_lin_vel) --
+        both_in_contact = in_contact_smooth[:, 0] & in_contact_smooth[:, 1]
+        self._double_support_steps = torch.where(
+            both_in_contact & has_lin_vel,
+            self._double_support_steps + 1,
+            torch.zeros_like(self._double_support_steps),
+        )
+        stand_bonus = 0.05 * torch.exp(
+            -self._double_support_steps.float() / 10.0
+        )
+        reward = torch.where(
+            both_in_contact & has_lin_vel, reward + stand_bonus, reward
+        )
+
+        # ---- 4d. Persist filtered contact for next frame -----------------
+        self._was_in_contact = in_contact_smooth
+
+        return reward  # (N,)
 
     # ------------------------------------------------------------------
     # Debug visualisation
@@ -439,6 +499,14 @@ class FootholdProximityReward(ManagerTermBase):
         self._p_star_cache[env_ids] = 0.0
         self._p_star_initialized[env_ids] = False
         self._was_in_contact[env_ids] = True
+        # Phase-state reset: default to left-swing; randomise for symmetry.
+        if isinstance(env_ids, slice):
+            n = self._phase_left_swing.shape[0]
+        else:
+            n = env_ids.numel()
+        self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
+        self._contact_filtered[env_ids] = 1.0
+        self._double_support_steps[env_ids] = 0
 
     # ------------------------------------------------------------------
     def _get_heightmap(self, env: "ManagerBasedRLEnv", root_pos: torch.Tensor) -> torch.Tensor:
