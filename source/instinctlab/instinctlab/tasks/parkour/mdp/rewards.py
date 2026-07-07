@@ -283,6 +283,77 @@ class FootholdProximityReward(ManagerTermBase):
               f"visualizer={'created' if self._foothold_visualizer is not None else 'None'},"
               f" num_envs={env.num_envs}, device={env.device}")
 
+        # ---- 3D visualisation: contact discs, foot->target lines, event flashes ----
+        if self._debug_vis:
+            # --- Contact state discs (red = stance, blue = swing) ---
+            contact_vis_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/FootholdContactDiscs",
+                markers={
+                    "contact": sim_utils.CylinderCfg(
+                        radius=0.045,
+                        height=0.01,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 0.0, 0.0)
+                        ),
+                    ),
+                    "swing": sim_utils.CylinderCfg(
+                        radius=0.045,
+                        height=0.01,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.0, 0.0, 1.0)
+                        ),
+                    ),
+                },
+            )
+            self._contact_vis = VisualizationMarkers(contact_vis_cfg)
+            self._contact_vis.set_visibility(True)
+
+            # --- Foot->target line markers (white thin cylinders) ---
+            line_vis_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/FootholdTargetLines",
+                markers={
+                    "line": sim_utils.CylinderCfg(
+                        radius=0.004,
+                        height=1.0,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 1.0, 1.0)
+                        ),
+                    ),
+                },
+            )
+            self._foot_target_line_vis = VisualizationMarkers(line_vis_cfg)
+            self._foot_target_line_vis.set_visibility(True)
+
+            # --- Event flash markers (yellow = swing onset, white = touchdown) ---
+            event_vis_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/FootholdEventFlashes",
+                markers={
+                    "swing_onset": sim_utils.SphereCfg(
+                        radius=0.06,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 0.8, 0.0)
+                        ),
+                    ),
+                    "touchdown": sim_utils.SphereCfg(
+                        radius=0.06,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 1.0, 1.0)
+                        ),
+                    ),
+                },
+            )
+            self._event_vis = VisualizationMarkers(event_vis_cfg)
+            self._event_vis.set_visibility(True)
+
+            # --- Event flash timer (4 columns: [L_swing, L_td, R_swing, R_td]) ---
+            self._event_timer = torch.zeros(env.num_envs, 4, dtype=torch.int, device=env.device)
+
+        # --- Cached frame data for _debug_vis_callback (always allocated) ---
+        self._last_body_pos = torch.zeros(env.num_envs, 2, 3, device=env.device)
+        self._last_contact = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+        self._last_touchdown = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+        self._last_swing_onset = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
@@ -402,12 +473,15 @@ class FootholdProximityReward(ManagerTermBase):
 
         # ---- 4b. Touchdown proximity reward (once per swing per foot) ------
         reward = torch.zeros(env.num_envs, device=env.device)
+        reward_per_foot = torch.zeros(env.num_envs, 2, device=env.device)  # for plotting
         for foot_idx in range(2):
             mask = touchdown[:, foot_idx] & self._swing_planned[:, foot_idx]
             if mask.any():
                 dist = body_pos[mask, foot_idx] - self._p_star_cache[mask, foot_idx]  # (M, 3)
                 dist_sq = (dist ** 2).sum(dim=-1)                                      # (M,)
-                reward[mask] += torch.exp(-sigma_p * dist_sq)                          # (M,)
+                foot_reward = torch.exp(-sigma_p * dist_sq)                            # (M,)
+                reward[mask] += foot_reward
+                reward_per_foot[mask, foot_idx] = foot_reward
                 # Clear flag so this reward fires only once per swing phase
                 self._swing_planned[mask, foot_idx] = False
 
@@ -419,13 +493,49 @@ class FootholdProximityReward(ManagerTermBase):
         # ---- 4d. Persist filtered contact for next frame -----------------
         self._was_in_contact = in_contact_smooth
 
+        # ---- 4e. Cache frame data for _debug_vis_callback -----------------
+        self._last_body_pos = body_pos.clone()
+        self._last_contact = in_contact_smooth.clone()
+        self._last_touchdown = touchdown.clone()
+        self._last_swing_onset = swing_onset.clone()
+
+        # ---- Event flash timer update ------------------------------------
+        if self._debug_vis and hasattr(self, '_event_timer'):
+            # Reset timers on new events (flash duration in frames)
+            self._event_timer[swing_onset[:, 0], 0] = 10   # left  foot swing onset
+            self._event_timer[touchdown[:, 0], 1] = 15     # left  foot touchdown
+            self._event_timer[swing_onset[:, 1], 2] = 10   # right foot swing onset
+            self._event_timer[touchdown[:, 1], 3] = 15     # right foot touchdown
+            # Decrement active timers (clamped to zero)
+            self._event_timer = (self._event_timer - 1).clamp(min=0)
+
         return reward  # (N,)
 
     # ------------------------------------------------------------------
     # Debug visualisation
     # ------------------------------------------------------------------
+    @staticmethod
+    def _quat_from_z_to_dir(dir: torch.Tensor) -> torch.Tensor:
+        """Compute (N, 4) quaternion (x, y, z, w) rotating local z-axis to *dir*."""
+        z = torch.zeros_like(dir)
+        z[:, 2] = 1.0
+        dot = (z * dir).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
+        cross = torch.cross(z, dir, dim=-1)
+        cross_norm = torch.norm(cross, dim=-1, keepdim=True)
+        # Parallel case (direction already aligned with z): identity quaternion
+        parallel = cross_norm.squeeze(-1) < 1e-8
+        # Half-angle trig
+        half_angle = torch.acos(dot) * 0.5
+        axis = cross / (cross_norm + 1e-8)
+        quat = torch.zeros(dir.shape[0], 4, device=dir.device)
+        quat[:, :3] = axis * torch.sin(half_angle)
+        quat[:, 3] = torch.cos(half_angle).squeeze(-1)
+        quat[parallel, :] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=dir.device)
+        return quat  # (N, 4) in (x, y, z, w) format
+
+    # ------------------------------------------------------------------
     def _debug_vis_callback(self, event):
-        """Render cached foothold target markers + DCM cost heatmap every frame."""
+        """Render cached foothold target markers + DCM cost heatmap + 3D overlays every frame."""
         # ---- Foothold spheres ----
         if self._foothold_visualizer is not None:
             n = self._p_star_cache.shape[0]
@@ -437,49 +547,109 @@ class FootholdProximityReward(ManagerTermBase):
                 self._foothold_visualizer.visualize(poses, marker_indices=marker_indices)
 
         # ---- DCM cost heatmap ----
-        if self._cost_visualizer is None:
-            return
-        if self._channels_left is None or self._channels_right is None:
-            return
+        if self._cost_visualizer is not None and self._channels_left is not None and self._channels_right is not None:
+            # For each environment, pick the channel dict that corresponds to
+            # the swinging foot (left-swing  → channels_left,  right-swing → channels_right).
+            # The visualiser's update() already skips envs where both feet are
+            # in contact, so we pass in_contact along.
+            in_contact = self._was_in_contact  # (N, 2) bool
 
-        # For each environment, pick the channel dict that corresponds to
-        # the swinging foot (left-swing  → channels_left,  right-swing → channels_right).
-        # The visualiser's update() already skips envs where both feet are
-        # in contact, so we pass in_contact along.
-        in_contact = self._was_in_contact  # (N, 2) bool
+            # Build a merged channels dict: pick left or right data per-environment.
+            merged: dict[str, torch.Tensor] = {}
+            for key in self._channels_left:
+                left_val = self._channels_left[key]    # (N, H, W) or (N,)
+                right_val = self._channels_right[key]  # (N, H, W) or (N,)
+                if left_val.dim() == 1:
+                    merged[key] = torch.where(
+                        in_contact[:, 0],   # (N,)
+                        right_val,          # (N,)
+                        left_val,           # (N,)
+                    )
+                else:
+                    merged[key] = torch.where(
+                        in_contact[:, 0:1, None],  # (N, 1, 1)
+                        right_val,
+                        left_val,
+                    )
 
-        # Build a merged channels dict: pick left or right data per-environment.
-        # Both *_left and *_right come from plan_with_channels_in_world which
-        # returns (N, H, W)-shaped tensors for each key.
-        merged: dict[str, torch.Tensor] = {}
-        for key in self._channels_left:
-            left_val = self._channels_left[key]    # (N, H, W) or (N,)
-            right_val = self._channels_right[key]  # (N, H, W) or (N,)
-            # left foot in contact  → stance on left  → right leg is swinging
-            # right foot in contact → stance on right → left leg is swinging
-            # Use right-val when left foot is in contact (right is swinging)
-            # Use left-val  when left foot is swinging
-            if left_val.dim() == 1:
-                # Scalar-per-env channels (e.g. best_idx: (N,))
-                merged[key] = torch.where(
-                    in_contact[:, 0],   # (N,)
-                    right_val,          # (N,)
-                    left_val,           # (N,)
+            self._cost_visualizer.update(
+                channels=merged,
+                heightmap=self._last_heightmap,
+                root_pos_w=self._last_root_pos,
+                root_quat_w=self._last_root_quat,
+                in_contact=in_contact,
+            )
+
+        # ================================================================
+        # 3D Scene overlays (contact discs + foot->target lines + events)
+        # ================================================================
+
+        # ---- Contact state discs (slightly below foot, red=stance, blue=swing) ----
+        if hasattr(self, '_contact_vis') and self._contact_vis is not None:
+            foot_pos_ground = self._last_body_pos.clone()
+            foot_pos_ground[:, :, 2] -= 0.02  # place slightly below foot
+            poses_flat = foot_pos_ground.reshape(-1, 3)  # (N*2, 3)
+            # marker: 0=contact(red), 1=swing(blue); invert boolean so True→0, False→1
+            contact_flat = (~self._last_contact).reshape(-1).long()  # (N*2,)
+            self._contact_vis.visualize(
+                translations=poses_flat,
+                marker_indices=contact_flat,
+            )
+
+        # ---- Foot->target lines (white cylinders from foot to p_star_cache) ----
+        if hasattr(self, '_foot_target_line_vis') and self._foot_target_line_vis is not None:
+            dirs = self._p_star_cache - self._last_body_pos  # (N, 2, 3)
+            lengths = torch.norm(dirs, dim=-1)  # (N, 2)
+            valid_mask = lengths > 0.01
+            valid_flat = valid_mask.reshape(-1)  # (N*2,)
+            if valid_flat.any():
+                foot_flat = self._last_body_pos.reshape(-1, 3)[valid_flat]
+                target_flat = self._p_star_cache.reshape(-1, 3)[valid_flat]
+                dir_flat = dirs.reshape(-1, 3)[valid_flat]
+                len_flat = lengths.reshape(-1)[valid_flat]
+                mid_flat = (foot_flat + target_flat) * 0.5
+                orient_flat = self._quat_from_z_to_dir(dir_flat)
+                scales_flat = torch.ones_like(mid_flat)
+                scales_flat[:, 2] = len_flat
+                self._foot_target_line_vis.visualize(
+                    translations=mid_flat,
+                    orientations=orient_flat,
+                    scales=scales_flat,
+                    marker_indices=torch.zeros(valid_flat.sum(), dtype=torch.int, device=dir_flat.device),
                 )
             else:
-                merged[key] = torch.where(
-                    in_contact[:, 0:1, None],  # (N, 1, 1) — left foot in contact?
-                    right_val,   # yes → right is swinging
-                    left_val,    # no  → left is swinging
-                )
+                self._foot_target_line_vis.visualize(translations=None)
 
-        self._cost_visualizer.update(
-            channels=merged,
-            heightmap=self._last_heightmap,
-            root_pos_w=self._last_root_pos,
-            root_quat_w=self._last_root_quat,
-            in_contact=in_contact,
-        )
+        # ---- Event flash markers (yellow=swing_onset, white=touchdown) ----
+        if hasattr(self, '_event_vis') and self._event_vis is not None:
+            event_positions = []
+            event_indices = []
+            for foot_idx in range(2):
+                # Swing onset timer columns: 0 for left, 2 for right
+                swing_timer = self._event_timer[:, foot_idx * 2]
+                swing_active = swing_timer > 0
+                if swing_active.any():
+                    event_positions.append(self._last_body_pos[swing_active, foot_idx])
+                    event_indices.append(
+                        torch.zeros(swing_active.sum(), dtype=torch.int, device=swing_timer.device)
+                    )
+                # Touchdown timer columns: 1 for left, 3 for right
+                td_timer = self._event_timer[:, foot_idx * 2 + 1]
+                td_active = td_timer > 0
+                if td_active.any():
+                    event_positions.append(self._last_body_pos[td_active, foot_idx])
+                    event_indices.append(
+                        torch.ones(td_active.sum(), dtype=torch.int, device=td_timer.device)
+                    )
+            if event_positions:
+                all_pos = torch.cat(event_positions, dim=0)
+                all_idx = torch.cat(event_indices, dim=0)
+                self._event_vis.visualize(
+                    translations=all_pos,
+                    marker_indices=all_idx,
+                )
+            else:
+                self._event_vis.visualize(translations=None)
 
 
     # ------------------------------------------------------------------
@@ -498,6 +668,8 @@ class FootholdProximityReward(ManagerTermBase):
         self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
         self._contact_filtered[env_ids] = 1.0
         self._swing_planned[env_ids] = False
+        if hasattr(self, '_event_timer'):
+            self._event_timer[env_ids] = 0
 
     # ------------------------------------------------------------------
     def _get_heightmap(self, env: "ManagerBasedRLEnv", root_pos: torch.Tensor) -> torch.Tensor:
