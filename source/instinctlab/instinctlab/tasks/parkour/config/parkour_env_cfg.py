@@ -715,7 +715,7 @@ class G1Rewards:
 
     foothold_proximity = RewTerm(
         func=mdp.FootholdProximityReward,
-        weight=2.0,
+        weight=10.0,
         params={
             "sigma_p": 10.0,
             "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),

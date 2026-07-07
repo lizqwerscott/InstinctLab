@@ -180,10 +180,12 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
 
 
 class FootholdProximityReward(ManagerTermBase):
-    """Dense reward for tracking DCM foothold targets.
+    """Touchdown reward for tracking DCM foothold targets.
 
-    Maintains a DCMFootholdPlanner + per-foot target caches so the reward
-    target is stable within each swing phase (only re-planned at swing onset).
+    At swing onset a target foothold is computed using the DCM planner.
+    At touchdown the L2 distance between the actual foot position and
+    the previously planned target is computed, producing a one-shot
+    Gaussian proximity reward per swing phase.
 
     Config params (resolved by the reward manager before __init__):
         asset_cfg (SceneEntityCfg): robot body config filtered to foot links.
@@ -223,10 +225,9 @@ class FootholdProximityReward(ManagerTermBase):
         # Smoothing prevents spurious phase switches from force noise.
         self._contact_filtered = torch.ones(env.num_envs, 2, dtype=torch.float32, device=env.device)
 
-        # Step counter while *both* feet are in contact AND a non-zero
-        # linear velocity is commanded (used for a decaying stand-to-walk
-        # bonus that helps the agent pick a foot to break symmetry).
-        self._double_support_steps = torch.zeros(env.num_envs, dtype=torch.int, device=env.device)
+        # Flag per foot indicating p_star_cache was set by a real plan (not lazy-init).
+        # Set True at swing onset, reset False at touchdown (reward fired once).
+        self._swing_planned = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
 
         # Resolve foot order by name (for correct left/right assignment)
         foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
@@ -375,6 +376,7 @@ class FootholdProximityReward(ManagerTermBase):
                         k=k[mask],
                     )
                     self._p_star_cache[mask, 1] = p_new
+                self._swing_planned[mask, foot_idx] = True
 
         # -- Cost-channel visualisation (full planning each frame, cache NOT updated) --
         if self._debug_vis and self._cost_visualizer is not None:
@@ -394,36 +396,25 @@ class FootholdProximityReward(ManagerTermBase):
             self._last_root_pos = root_pos
             self._last_root_quat = root_quat
 
-        # ---- 4. Reward ---------------------------------------------------
-        # ---- 4a. Velocity-condition gate --------------------------------
+        # ---- 4. Reward: one-shot at touchdown (landing) --------------------
+        # ---- 4a. Touchdown detection (rising edge: not-in-contact -> in-contact) -
+        touchdown = in_contact_smooth & (~self._was_in_contact)  # (N, 2)
+
+        # ---- 4b. Touchdown proximity reward (once per swing per foot) ------
+        reward = torch.zeros(env.num_envs, device=env.device)
+        for foot_idx in range(2):
+            mask = touchdown[:, foot_idx] & self._swing_planned[:, foot_idx]
+            if mask.any():
+                dist = body_pos[mask, foot_idx] - self._p_star_cache[mask, foot_idx]  # (M, 3)
+                dist_sq = (dist ** 2).sum(dim=-1)                                      # (M,)
+                reward[mask] += torch.exp(-sigma_p * dist_sq)                          # (M,)
+                # Clear flag so this reward fires only once per swing phase
+                self._swing_planned[mask, foot_idx] = False
+
+        # ---- 4c. Velocity-condition gate -----------------------------------
         vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
         has_lin_vel = torch.norm(vel_cmd_full[:, :2], dim=1) > 0.05      # (N,)
-
-        # ---- 4b. Swing-leg Gaussian proximity ---------------------------
-        swing_foot_idx = torch.where(self._phase_left_swing, 0, 1)       # (N,) 0 or 1
-        dist_sq = ((body_pos - self._p_star_cache) ** 2).sum(dim=-1)    # (N, 2)
-        gauss = torch.exp(-sigma_p * dist_sq)                            # (N, 2)
-        swing_gauss = gauss[torch.arange(env.num_envs, device=env.device), swing_foot_idx]  # (N,)
-
-        # Only environments with a linear-velocity command receive the
-        # proximity reward (pure rotation or stand-still should NOT
-        # incentivise stepping).
-        reward = torch.zeros(env.num_envs, device=env.device)
-        reward = torch.where(has_lin_vel, swing_gauss, reward)
-
-        # ---- 4c. Double-support bonus (decaying, only when has_lin_vel) --
-        both_in_contact = in_contact_smooth[:, 0] & in_contact_smooth[:, 1]
-        self._double_support_steps = torch.where(
-            both_in_contact & has_lin_vel,
-            self._double_support_steps + 1,
-            torch.zeros_like(self._double_support_steps),
-        )
-        stand_bonus = 0.05 * torch.exp(
-            -self._double_support_steps.float() / 10.0
-        )
-        reward = torch.where(
-            both_in_contact & has_lin_vel, reward + stand_bonus, reward
-        )
+        reward = torch.where(has_lin_vel, reward, reward * 0.0)
 
         # ---- 4d. Persist filtered contact for next frame -----------------
         self._was_in_contact = in_contact_smooth
@@ -506,7 +497,7 @@ class FootholdProximityReward(ManagerTermBase):
             n = env_ids.numel()
         self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
         self._contact_filtered[env_ids] = 1.0
-        self._double_support_steps[env_ids] = 0
+        self._swing_planned[env_ids] = False
 
     # ------------------------------------------------------------------
     def _get_heightmap(self, env: "ManagerBasedRLEnv", root_pos: torch.Tensor) -> torch.Tensor:
