@@ -350,6 +350,21 @@ class FootholdProximityReward(ManagerTermBase):
             self._event_vis = VisualizationMarkers(event_vis_cfg)
             self._event_vis.set_visibility(True)
 
+            # --- Nominal foothold marker (orange sphere) ---
+            nominal_vis_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/NominalFoothold",
+                markers={
+                    "nominal": sim_utils.SphereCfg(
+                        radius=0.05,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 0.5, 0.0)
+                        ),
+                    ),
+                },
+            )
+            self._nominal_vis = VisualizationMarkers(nominal_vis_cfg)
+            self._nominal_vis.set_visibility(True)
+
             # --- Event flash timer (4 columns: [L_swing, L_td, R_swing, R_td]) ---
             self._event_timer = torch.zeros(env.num_envs, 4, dtype=torch.int, device=env.device)
 
@@ -358,6 +373,9 @@ class FootholdProximityReward(ManagerTermBase):
         self._last_contact = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
         self._last_touchdown = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
         self._last_swing_onset = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+        self._last_L_nom = None
+        self._last_W_nom_left = None
+        self._last_W_nom_right = None
 
     # ------------------------------------------------------------------
 
@@ -472,6 +490,9 @@ class FootholdProximityReward(ManagerTermBase):
             self._last_heightmap = heightmap
             self._last_root_pos = root_pos
             self._last_root_quat = root_quat
+            self._last_L_nom = self._channels_left['L_nom']   # (N, 1, 1)
+            self._last_W_nom_left = self._channels_left['W_nom']   # (N, 1, 1)  swing_leg_sign=+1 → +lp
+            self._last_W_nom_right = self._channels_right['W_nom']   # (N, 1, 1)  swing_leg_sign=-1 → -lp
 
         # ---- 4. Reward: one-shot at touchdown (landing) --------------------
         # ---- 4a. Touchdown detection (rising edge: not-in-contact -> in-contact) -
@@ -693,6 +714,55 @@ class FootholdProximityReward(ManagerTermBase):
                 else:
                     self._event_vis.visualize(translations=None)
 
+        # ---- Nominal foothold marker (orange sphere at L_nom, W_nom, terrain_z) ----
+        if hasattr(self, '_nominal_vis') and self._nominal_vis is not None:
+            if self._last_L_nom is not None and self._last_W_nom_left is not None and self._last_W_nom_right is not None:
+                vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+                L_nom_flat = self._last_L_nom.squeeze(-1).squeeze(-1)  # (N,)
+                # Pick W_nom based on actual swing foot
+                W_nom_flat = torch.where(
+                    self._phase_left_swing,
+                    self._last_W_nom_left.squeeze(-1).squeeze(-1),   # (N,)  left swing  → +lp
+                    self._last_W_nom_right.squeeze(-1).squeeze(-1),  # (N,)  right swing → -lp
+                )
+                print(f"W_nom min={W_nom_flat.min().item():.4f}  max={W_nom_flat.max().item():.4f}  [4]={W_nom_flat[4].item():.4f}")
+
+                # Grid indices for terrain height lookup
+                cell_size = self._planner.cell_size
+                g_w, g_h = self._planner.grid_w, self._planner.grid_h
+                ix = (L_nom_flat / cell_size + (g_w - 1) / 2).round().long().clamp(0, g_w - 1)
+                iy = (W_nom_flat / cell_size + (g_h - 1) / 2).round().long().clamp(0, g_h - 1)
+
+                # Sample terrain height from heightmap (h_safe equivalent via 0-fill)
+                h_map = self._last_heightmap  # (N, H, W)
+                N = h_map.shape[0]
+                terrain_z = torch.where(
+                    torch.isnan(h_map[torch.arange(N, device=h_map.device), iy, ix]),
+                    torch.zeros(N, device=h_map.device),
+                    h_map[torch.arange(N, device=h_map.device), iy, ix],
+                )  # (N,)
+
+                # Nominal foothold in pelvis-local frame
+                nominal_local = torch.stack([L_nom_flat, W_nom_flat, terrain_z], dim=-1)  # (N, 3)
+
+                # Convert to world frame (same rotation as plan_with_channels_in_world)
+                q_conj = self._last_root_quat.clone()
+                q_conj[:, 1:] *= -1.0
+                nominal_world = quat_apply_inverse(q_conj, nominal_local) + self._last_root_pos  # (N, 3)
+
+                # Apply terrain mask
+                if vis_mask is not None:
+                    nominal_world = nominal_world[vis_mask]
+                if nominal_world.shape[0] > 0:
+                    self._nominal_vis.visualize(
+                        translations=nominal_world,
+                        marker_indices=torch.zeros(
+                            nominal_world.shape[0], dtype=torch.int, device=nominal_world.device
+                        ),
+                    )
+                else:
+                    self._nominal_vis.visualize(translations=None)
+
 
     # ------------------------------------------------------------------
     def reset(self, env_ids: torch.Tensor | None = None):
@@ -713,6 +783,9 @@ class FootholdProximityReward(ManagerTermBase):
         if hasattr(self, '_event_timer'):
             self._event_timer[env_ids] = 0
         self._terrain_mask = None
+        self._last_L_nom = None
+        self._last_W_nom_left = None
+        self._last_W_nom_right = None
 
     # ------------------------------------------------------------------
     def _update_terrain_mask(self, env: "ManagerBasedRLEnv"):

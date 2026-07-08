@@ -362,6 +362,7 @@ class DCMFootholdPlanner:
             'Q': Q, 'E': E, 'M': M, 'b': b,
             'd_pos': d_pos, 'd_dcm': d_dcm, 'J': J,
             'valid': valid, 'h_safe': h_safe,
+            'L_nom': L_nom, 'W_nom': W_nom,
         }
 
     # -----------------------------------------------------------------------
