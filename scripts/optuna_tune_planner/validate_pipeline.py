@@ -283,10 +283,16 @@ def _create_shared_env(task_name: str):
     """
     try:
         import gymnasium as gym
+        import sys as _sys
         from isaaclab_tasks.utils import parse_env_cfg
         from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
 
-        env_cfg = parse_env_cfg(task_name, device="cuda:0", num_envs=4)
+        _old_limit = _sys.getrecursionlimit()
+        _sys.setrecursionlimit(max(_old_limit, 5000))
+        try:
+            env_cfg = parse_env_cfg(task_name, device="cuda:0", num_envs=4)
+        finally:
+            _sys.setrecursionlimit(_old_limit)
         env_cfg.scene.num_envs = 4
         # Do NOT set camera=None — keeping the full config avoids
         # configclass validation recursion and the overhead is negligible
@@ -296,9 +302,11 @@ def _create_shared_env(task_name: str):
         _print_result("1.1", "gym.make", True, f"num_envs={env.unwrapped.num_envs}")
 
         env = InstinctRlVecEnvWrapper(env)
-        obs, _ = env.get_observations()
+        obs, info = env.get_observations()
+        # Wrapper returns (tensor, dict), not (dict, ...) — obs is a flat tensor.
+        obs_shape = tuple(obs.shape) if hasattr(obs, 'shape') else type(obs).__name__
         _print_result("1.1", "InstinctRlVecEnvWrapper", True,
-                      f"obs keys={list(obs.keys())}")
+                      f"obs shape={obs_shape}")
         return env, True, ""
 
     except ImportError as e:

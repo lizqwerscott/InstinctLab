@@ -154,15 +154,20 @@ class PlannerEvaluator:
           - Disable domain randomisation that adds variance unrelated to
             planner quality.
         """
-        # Import task configs lazily — they register gym environments as a
-        # side-effect, which requires Isaac Sim to be running.
+        import sys
+        _old_recursion_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(max(_old_recursion_limit, 5000))
+
         from isaaclab_tasks.utils import parse_env_cfg
 
-        env_cfg = parse_env_cfg(
-            task_name,
-            device=self._device,
-            num_envs=self._cfg.num_envs,
-        )
+        try:
+            env_cfg = parse_env_cfg(
+                task_name,
+                device=self._device,
+                num_envs=self._cfg.num_envs,
+            )
+        finally:
+            sys.setrecursionlimit(_old_recursion_limit)
 
         # ---- Scale down for fast evaluation ----
         env_cfg.scene.num_envs = self._cfg.num_envs
