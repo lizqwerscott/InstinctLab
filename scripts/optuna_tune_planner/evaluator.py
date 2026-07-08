@@ -65,20 +65,29 @@ class PlannerEvaluator:
         self._cfg = cfg
         self._device = cfg.device
 
-        # ------------------------------------------------------------------
-        # 1. Create the evaluation environment
-        # ------------------------------------------------------------------
-        self._env = self._create_env(task_name, env_cfg=env_cfg)
+        # ---- Raise recursion limit for the ENTIRE init sequence ----
+        # configclass validation can recurse deeply; 5000 is enough for
+        # all known Isaac Lab config trees.
+        import sys
+        _old_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(max(_old_limit, 5000))
+        try:
+            # --------------------------------------------------------------
+            # 1. Create the evaluation environment
+            # --------------------------------------------------------------
+            self._env = self._create_env(task_name, env_cfg=env_cfg)
 
-        # ------------------------------------------------------------------
-        # 2. Load the frozen policy
-        # ------------------------------------------------------------------
-        self._policy = self._load_policy(checkpoint_path)
+            # --------------------------------------------------------------
+            # 2. Load the frozen policy
+            # --------------------------------------------------------------
+            self._policy = self._load_policy(checkpoint_path)
 
-        # ------------------------------------------------------------------
-        # 3. Bootstrap the terrain-index → name mapping
-        # ------------------------------------------------------------------
-        self._setup_terrain_mapping()
+            # --------------------------------------------------------------
+            # 3. Bootstrap the terrain-index → name mapping
+            # --------------------------------------------------------------
+            self._setup_terrain_mapping()
+        finally:
+            sys.setrecursionlimit(_old_limit)
 
     # ==================================================================
     # Public: evaluate one parameter set
@@ -146,64 +155,48 @@ class PlannerEvaluator:
 
         If ``env_cfg`` is provided it is used directly (must already have
         ``num_envs`` set).  Otherwise the config is parsed from ``task_name``.
+
+        Note: recursion limit is managed by ``__init__``, not here.
         """
-        import sys
-        _old_recursion_limit = sys.getrecursionlimit()
-        sys.setrecursionlimit(max(_old_recursion_limit, 5000))
-        print(f"[DIAG] _create_env: env_cfg is None = {env_cfg is None}, "
-              f"recursion_limit = {sys.getrecursionlimit()}")
+        if env_cfg is None:
+            from isaaclab_tasks.utils import parse_env_cfg
+            env_cfg = parse_env_cfg(
+                task_name,
+                device=self._device,
+                num_envs=self._cfg.num_envs,
+            )
 
-        try:
-            if env_cfg is None:
-                print("[DIAG] _create_env: calling parse_env_cfg (may recurse)")
-                from isaaclab_tasks.utils import parse_env_cfg
-                env_cfg = parse_env_cfg(
-                    task_name,
-                    device=self._device,
-                    num_envs=self._cfg.num_envs,
-                )
-            else:
-                print("[DIAG] _create_env: using pre-built env_cfg, skipping parse_env_cfg")
+        # ---- Scale down for fast evaluation ----
+        env_cfg.scene.num_envs = self._cfg.num_envs
+        env_cfg.episode_length_s = 20.0  # enough for a full traverse
 
-            # ---- Scale down for fast evaluation ----
-            env_cfg.scene.num_envs = self._cfg.num_envs
-            env_cfg.episode_length_s = 20.0  # enough for a full traverse
+        # ---- Reduce terrain curriculum (evaluate all levels at once) ----
+        if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
+            env_cfg.curriculum = None
 
-            # ---- Disable expensive visual sensors ----
-            # NOTE: Do NOT set camera=None — it can trigger configclass
-            # validation recursion due to circular dataclass references.
-            # The overhead is acceptable for evaluation-scale rollouts.
+        # ---- Disable push-robot randomisation for lower variance ----
+        if hasattr(env_cfg.events, "push_robot"):
+            env_cfg.events.push_robot = None
 
-            # ---- Reduce terrain curriculum (evaluate all levels at once) ----
-            if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
-                env_cfg.curriculum = None
+        # ---- Disable physics-material randomisation ----
+        if hasattr(env_cfg.events, "physics_material"):
+            env_cfg.events.physics_material = None
 
-            # ---- Disable push-robot randomisation for lower variance ----
-            if hasattr(env_cfg.events, "push_robot"):
-                env_cfg.events.push_robot = None
+        # ---- Ensure debug visualisation is off (saves GPU time) ----
+        for field_name in env_cfg.rewards.__dataclass_fields__:
+            if field_name == "rewards":
+                rewards_cfg = getattr(env_cfg.rewards, field_name)
+                for rew_field in rewards_cfg.__dataclass_fields__:
+                    rew_term = getattr(rewards_cfg, rew_field)
+                    if hasattr(rew_term, "params") and rew_term.params is not None:
+                        if "debug_vis" in rew_term.params:
+                            rew_term.params["debug_vis"] = False
 
-            # ---- Disable physics-material randomisation ----
-            if hasattr(env_cfg.events, "physics_material"):
-                env_cfg.events.physics_material = None
+        # ---- Create gym environment ----
+        env = gym.make(task_name, cfg=env_cfg)
 
-            # ---- Ensure debug visualisation is off (saves GPU time) ----
-            for field_name in env_cfg.rewards.__dataclass_fields__:
-                if field_name == "rewards":
-                    rewards_cfg = getattr(env_cfg.rewards, field_name)
-                    for rew_field in rewards_cfg.__dataclass_fields__:
-                        rew_term = getattr(rewards_cfg, rew_field)
-                        if hasattr(rew_term, "params") and rew_term.params is not None:
-                            if "debug_vis" in rew_term.params:
-                                rew_term.params["debug_vis"] = False
-
-            # ---- Create gym environment ----
-            env = gym.make(task_name, cfg=env_cfg)
-
-            # ---- Wrap for instinct_rl interface ----
-            env = InstinctRlVecEnvWrapper(env)
-
-        finally:
-            sys.setrecursionlimit(_old_recursion_limit)
+        # ---- Wrap for instinct_rl interface ----
+        env = InstinctRlVecEnvWrapper(env)
 
         return env
 
