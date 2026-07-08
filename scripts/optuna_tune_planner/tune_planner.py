@@ -101,14 +101,8 @@ parser.add_argument(
     default=42,
     help="Random seed for the TPE sampler.",
 )
-parser.add_argument(
-    "--device",
-    type=str,
-    default="cuda:0",
-    help="Isaac Sim device (cuda:0 or cpu).",
-)
-
-# Isaac Sim AppLauncher args (headless, etc.)
+# Isaac Sim AppLauncher args (headless, device, etc.)
+# NOTE: do NOT add --device yourself — AppLauncher owns it.
 from isaaclab.app import AppLauncher
 AppLauncher.add_app_launcher_args(parser)
 
