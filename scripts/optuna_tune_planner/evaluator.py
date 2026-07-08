@@ -65,15 +65,9 @@ class PlannerEvaluator:
         self._cfg = cfg
         self._device = cfg.device
 
-        import sys
-        _old_limit = sys.getrecursionlimit()
-        sys.setrecursionlimit(max(_old_limit, 5000))
-        try:
-            self._env = self._create_env(task_name)
-            self._policy = self._load_policy(checkpoint_path)
-            self._setup_terrain_mapping()
-        finally:
-            sys.setrecursionlimit(_old_limit)
+        self._env = self._create_env(task_name)
+        self._policy = self._load_policy(checkpoint_path)
+        self._setup_terrain_mapping()
 
     # ==================================================================
     # Public: evaluate one parameter set
@@ -139,48 +133,46 @@ class PlannerEvaluator:
     def _create_env(self, task_name: str, env_cfg=None) -> InstinctRlVecEnvWrapper:
         """Build a lightweight evaluation environment.
 
-        IMPORTANT:  Isaac Lab's configclass has a bug where reusing the same
-        config object across two ``gym.make`` calls triggers infinite
-        recursion in ``cfg.validate()``.  We therefore ALWAYS parse a
-        FRESH config via ``parse_env_cfg``.  The ``env_cfg`` parameter is
-        accepted for API compatibility but *never reused* — it is ignored.
+        Monkey-patches ``configclass._validate`` to a no-op before calling
+        ``parse_env_cfg`` + ``gym.make``, then restores it.  This is the
+        only reliable way to avoid infinite recursion in Isaac Lab's
+        configclass validation.
         """
-        from isaaclab_tasks.utils import parse_env_cfg
-        env_cfg = parse_env_cfg(
-            task_name,
-            device=self._device,
-            num_envs=self._cfg.num_envs,
-        )
+        from isaaclab.utils import configclass as _cc
 
-        # ---- Scale down for fast evaluation ----
-        env_cfg.scene.num_envs = self._cfg.num_envs
-        env_cfg.episode_length_s = 20.0
+        _orig_validate = getattr(_cc, '_validate', None)
+        if _orig_validate is not None:
+            _cc._validate = lambda obj, prefix='': ([], [])
 
-        # ---- Reduce terrain curriculum ----
-        if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
-            env_cfg.curriculum = None
+        try:
+            from isaaclab_tasks.utils import parse_env_cfg
+            env_cfg = parse_env_cfg(
+                task_name, device=self._device, num_envs=self._cfg.num_envs,
+            )
+            env_cfg.scene.num_envs = self._cfg.num_envs
+            env_cfg.episode_length_s = 20.0
 
-        # ---- Disable domain randomisation for lower variance ----
-        if hasattr(env_cfg.events, "push_robot"):
-            env_cfg.events.push_robot = None
-        if hasattr(env_cfg.events, "physics_material"):
-            env_cfg.events.physics_material = None
+            if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
+                env_cfg.curriculum = None
+            if hasattr(env_cfg.events, "push_robot"):
+                env_cfg.events.push_robot = None
+            if hasattr(env_cfg.events, "physics_material"):
+                env_cfg.events.physics_material = None
 
-        # ---- Disable debug visualisation ----
-        for field_name in env_cfg.rewards.__dataclass_fields__:
-            if field_name == "rewards":
-                rewards_cfg = getattr(env_cfg.rewards, field_name)
-                for rew_field in rewards_cfg.__dataclass_fields__:
-                    rew_term = getattr(rewards_cfg, rew_field)
-                    if hasattr(rew_term, "params") and rew_term.params is not None:
-                        if "debug_vis" in rew_term.params:
-                            rew_term.params["debug_vis"] = False
+            for field_name in env_cfg.rewards.__dataclass_fields__:
+                if field_name == "rewards":
+                    rewards_cfg = getattr(env_cfg.rewards, field_name)
+                    for rew_field in rewards_cfg.__dataclass_fields__:
+                        rew_term = getattr(rewards_cfg, rew_field)
+                        if hasattr(rew_term, "params") and rew_term.params is not None:
+                            if "debug_vis" in rew_term.params:
+                                rew_term.params["debug_vis"] = False
 
-        # ---- Create gym environment ----
-        env = gym.make(task_name, cfg=env_cfg)
-
-        # ---- Wrap for instinct_rl interface ----
-        env = InstinctRlVecEnvWrapper(env)
+            env = gym.make(task_name, cfg=env_cfg)
+            env = InstinctRlVecEnvWrapper(env)
+        finally:
+            if _orig_validate is not None:
+                _cc._validate = _orig_validate
 
         return env
 
