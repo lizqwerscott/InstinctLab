@@ -172,8 +172,9 @@ class PlannerEvaluator:
             env_cfg.episode_length_s = 20.0  # enough for a full traverse
 
             # ---- Disable expensive visual sensors ----
-            if hasattr(env_cfg.scene, "camera"):
-                env_cfg.scene.camera = None
+            # NOTE: Do NOT set camera=None — it can trigger configclass
+            # validation recursion due to circular dataclass references.
+            # The overhead is acceptable for evaluation-scale rollouts.
 
             # ---- Reduce terrain curriculum (evaluate all levels at once) ----
             if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
