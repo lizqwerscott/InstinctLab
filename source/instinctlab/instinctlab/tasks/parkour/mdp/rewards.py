@@ -365,6 +365,20 @@ class FootholdProximityReward(ManagerTermBase):
             self._nominal_vis = VisualizationMarkers(nominal_vis_cfg)
             self._nominal_vis.set_visibility(True)
 
+            # --- Stair height vertical line (red) ---
+            h_line_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/StairHeightLine",
+                markers={
+                    "line": sim_utils.CylinderCfg(
+                        radius=0.006,
+                        height=1.0,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+                    ),
+                },
+            )
+            self._h_line_vis = VisualizationMarkers(h_line_cfg)
+            self._h_line_vis.set_visibility(True)
+
             # --- Event flash timer (4 columns: [L_swing, L_td, R_swing, R_td]) ---
             self._event_timer = torch.zeros(env.num_envs, 4, dtype=torch.int, device=env.device)
 
@@ -376,6 +390,8 @@ class FootholdProximityReward(ManagerTermBase):
         self._last_L_nom = None
         self._last_W_nom_left = None
         self._last_W_nom_right = None
+        self._last_h_center = None  # (N,) center patch height for stair height line
+        self._last_h_fwd = None     # (N,) forward patch height for stair height line
 
     # ------------------------------------------------------------------
 
@@ -455,6 +471,10 @@ class FootholdProximityReward(ManagerTermBase):
         h_center = center_patch.mean(dim=(1, 2))                          # (N,)
         h_fwd    = fwd_patch.mean(dim=(1, 2))                             # (N,)
         k = (h_fwd - h_center) / self._planner.T
+        if self._debug_vis:
+            self._last_h_center = h_center.detach().clone()
+            self._last_h_fwd = h_fwd.detach().clone()
+            self._last_fwd_dist = fwd_dist
 
         # ---- 3b. Cache update: plan ONLY at swing onset for each foot ----
         # Left foot swing onset  → plan left-foot target (stance = right foot, sign = +1)
@@ -734,7 +754,6 @@ class FootholdProximityReward(ManagerTermBase):
                     self._last_W_nom_left.squeeze(-1).squeeze(-1),   # (N,)  left swing  → +lp
                     self._last_W_nom_right.squeeze(-1).squeeze(-1),  # (N,)  right swing → -lp
                 )
-                print(f"W_nom min={W_nom_flat.min().item():.4f}  max={W_nom_flat.max().item():.4f}  [4]={W_nom_flat[4].item():.4f}")
 
                 # Grid indices for terrain height lookup
                 cell_size = self._planner.cell_size
@@ -772,6 +791,59 @@ class FootholdProximityReward(ManagerTermBase):
                 else:
                     self._nominal_vis.visualize(translations=None)
 
+        # ---- Stair height vertical line (from h_center to h_fwd at fwd_dist ahead) ----
+        if hasattr(self, '_h_line_vis') and self._h_line_vis is not None and self._last_h_center is not None:
+            h_c = self._last_h_center     # (N,)
+            h_f = self._last_h_fwd        # (N,)
+            vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+            if vis_mask is not None:
+                h_c = h_c[vis_mask]
+                h_f = h_f[vis_mask]
+            n_valid = h_c.shape[0]
+            if n_valid > 0:
+                # Forward position in local frame: (fwd_dist, 0, 0)
+                fwd_local = torch.zeros(n_valid, 3, device=h_c.device)
+                fwd_local[:, 0] = self._last_fwd_dist
+
+                # Rotate to world frame
+                if vis_mask is not None:
+                    root_pos_v = self._last_root_pos[vis_mask]
+                    root_quat_v = self._last_root_quat[vis_mask]
+                else:
+                    root_pos_v = self._last_root_pos
+                    root_quat_v = self._last_root_quat
+
+                q_conj = root_quat_v.clone()
+                q_conj[:, 1:] *= -1.0
+                fwd_xy_w = quat_apply_inverse(q_conj, fwd_local) + root_pos_v
+
+                # Bottom at forward terrain height, top at forward terrain + step_height.
+                # This ensures the line sits on the actual terrain at its XY position
+                # instead of piercing through the ground when going up stairs.
+                bottom_w = fwd_xy_w.clone()
+                bottom_w[:, 2] = h_f
+                top_w = fwd_xy_w.clone()
+                top_w[:, 2] = h_f + (h_f - h_c)  # = 2*h_f - h_c
+
+                dir_w = top_w - bottom_w
+                len_w = torch.norm(dir_w, dim=-1)
+                valid_line = len_w > 0.005
+                if valid_line.any():
+                    mid_w = (bottom_w + top_w) * 0.5
+                    scales = torch.ones(n_valid, 3, device=h_c.device)
+                    scales[:, 2] = len_w
+                    orient_w = self._quat_from_z_to_dir(dir_w)
+                    self._h_line_vis.visualize(
+                        translations=mid_w[valid_line],
+                        orientations=orient_w[valid_line],
+                        scales=scales[valid_line],
+                        marker_indices=None,
+                    )
+                else:
+                    self._h_line_vis.visualize(translations=None)
+            else:
+                self._h_line_vis.visualize(translations=None)
+
 
     # ------------------------------------------------------------------
     def reset(self, env_ids: torch.Tensor | None = None):
@@ -795,6 +867,9 @@ class FootholdProximityReward(ManagerTermBase):
         self._last_L_nom = None
         self._last_W_nom_left = None
         self._last_W_nom_right = None
+        self._last_h_center = None
+        self._last_h_fwd = None
+        self._last_fwd_dist = None
 
     # ------------------------------------------------------------------
     def _update_terrain_mask(self, env: "ManagerBasedRLEnv"):
