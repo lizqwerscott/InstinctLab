@@ -69,20 +69,11 @@ class PlannerEvaluator:
         _old_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(_old_limit, 5000))
         try:
-            print("[DIAG] Step 1/3: _create_env ...")
-            self._env = self._create_env(task_name, env_cfg=env_cfg)
-            print("[DIAG] Step 1/3: OK")
-
-            print("[DIAG] Step 2/3: _load_policy ...")
+            self._env = self._create_env(task_name)
             self._policy = self._load_policy(checkpoint_path)
-            print("[DIAG] Step 2/3: OK")
-
-            print("[DIAG] Step 3/3: _setup_terrain_mapping ...")
             self._setup_terrain_mapping()
-            print("[DIAG] Step 3/3: OK")
         finally:
             sys.setrecursionlimit(_old_limit)
-        print("[DIAG] __init__ complete")
 
     # ==================================================================
     # Public: evaluate one parameter set
@@ -148,36 +139,34 @@ class PlannerEvaluator:
     def _create_env(self, task_name: str, env_cfg=None) -> InstinctRlVecEnvWrapper:
         """Build a lightweight evaluation environment.
 
-        If ``env_cfg`` is provided it is used directly (must already have
-        ``num_envs`` set).  Otherwise the config is parsed from ``task_name``.
-
-        Note: recursion limit is managed by ``__init__``, not here.
+        IMPORTANT:  Isaac Lab's configclass has a bug where reusing the same
+        config object across two ``gym.make`` calls triggers infinite
+        recursion in ``cfg.validate()``.  We therefore ALWAYS parse a
+        FRESH config via ``parse_env_cfg``.  The ``env_cfg`` parameter is
+        accepted for API compatibility but *never reused* — it is ignored.
         """
-        if env_cfg is None:
-            from isaaclab_tasks.utils import parse_env_cfg
-            env_cfg = parse_env_cfg(
-                task_name,
-                device=self._device,
-                num_envs=self._cfg.num_envs,
-            )
+        from isaaclab_tasks.utils import parse_env_cfg
+        env_cfg = parse_env_cfg(
+            task_name,
+            device=self._device,
+            num_envs=self._cfg.num_envs,
+        )
 
         # ---- Scale down for fast evaluation ----
         env_cfg.scene.num_envs = self._cfg.num_envs
-        env_cfg.episode_length_s = 20.0  # enough for a full traverse
+        env_cfg.episode_length_s = 20.0
 
-        # ---- Reduce terrain curriculum (evaluate all levels at once) ----
+        # ---- Reduce terrain curriculum ----
         if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
             env_cfg.curriculum = None
 
-        # ---- Disable push-robot randomisation for lower variance ----
+        # ---- Disable domain randomisation for lower variance ----
         if hasattr(env_cfg.events, "push_robot"):
             env_cfg.events.push_robot = None
-
-        # ---- Disable physics-material randomisation ----
         if hasattr(env_cfg.events, "physics_material"):
             env_cfg.events.physics_material = None
 
-        # ---- Ensure debug visualisation is off (saves GPU time) ----
+        # ---- Disable debug visualisation ----
         for field_name in env_cfg.rewards.__dataclass_fields__:
             if field_name == "rewards":
                 rewards_cfg = getattr(env_cfg.rewards, field_name)
