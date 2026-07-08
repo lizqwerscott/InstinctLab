@@ -372,9 +372,10 @@ class PlannerEvaluator:
         available via ``terrain.terrain_types``.
         """
         unwrapped = self._env.unwrapped
-        if "terrain" not in unwrapped.scene:
+        try:
+            terrain = unwrapped.scene["terrain"]
+        except (KeyError, IndexError, TypeError):
             return None
-        terrain = unwrapped.scene["terrain"]
         if hasattr(terrain, "terrain_types"):
             tt = terrain.terrain_types
             if isinstance(tt, torch.Tensor):
@@ -393,10 +394,10 @@ class PlannerEvaluator:
         accumulator can group statistics by terrain name.
         """
         unwrapped = self._env.unwrapped
-        if "terrain" not in unwrapped.scene:
+        try:
+            terrain = unwrapped.scene["terrain"]
+        except (KeyError, IndexError, TypeError):
             return
-
-        terrain = unwrapped.scene["terrain"]
         cfg = getattr(terrain.cfg, "terrain_generator", None)
         if cfg is None:
             return
