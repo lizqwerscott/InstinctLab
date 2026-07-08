@@ -274,73 +274,49 @@ def check_isaac_imports() -> Tuple[bool, bool]:
     return available, available  # first bool is "test passed" (always true), second is "available"
 
 
-def check_env_creation(task_name: str) -> bool:
-    """Test that the gym environment can be created and wrapped."""
+def _create_shared_env(task_name: str):
+    """Create and wrap a single environment, shared by Phase 1-2 checks.
+
+    Only ONE environment is created per validation run to avoid the
+    configclass recursion issue when parse_env_cfg is called repeatedly.
+    Returns (env, ok_flag, error_message).
+    """
     try:
         import gymnasium as gym
-        import torch
         from isaaclab_tasks.utils import parse_env_cfg
         from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
-    except ImportError as e:
-        _print_result("1.1", "env creation imports", False, str(e))
-        return False
 
-    ok = True
-    try:
         env_cfg = parse_env_cfg(task_name, device="cuda:0", num_envs=4)
-        _print_result("1.1", "parse_env_cfg", True)
-    except Exception as e:
-        _print_result("1.1", "parse_env_cfg", False, str(e)[:100])
-        return False
-
-    try:
         env_cfg.scene.num_envs = 4
-        # Disable camera to speed up test.
-        if hasattr(env_cfg.scene, "camera"):
-            env_cfg.scene.camera = None
+        # Do NOT set camera=None — keeping the full config avoids
+        # configclass validation recursion and the overhead is negligible
+        # with only 4 environments.
+
         env = gym.make(task_name, cfg=env_cfg)
         _print_result("1.1", "gym.make", True, f"num_envs={env.unwrapped.num_envs}")
-    except Exception as e:
-        _print_result("1.1", "gym.make", False, str(e)[:150])
-        return False
 
-    try:
         env = InstinctRlVecEnvWrapper(env)
         obs, _ = env.get_observations()
         _print_result("1.1", "InstinctRlVecEnvWrapper", True,
                       f"obs keys={list(obs.keys())}")
+        return env, True, ""
+
+    except ImportError as e:
+        _print_result("1.1", "imports", False, str(e))
+        return None, False, str(e)
     except Exception as e:
-        _print_result("1.1", "InstinctRlVecEnvWrapper", False, str(e)[:150])
-        ok = False
+        _print_result("1.1", "env creation", False, str(e)[:200])
+        return None, False, str(e)
 
+
+def check_reward_term_exists(env) -> bool:
+    """Verify the foothold_proximity reward term exists (env already created)."""
     try:
-        env.close()
-    except Exception:
-        pass
-    return ok
-
-
-def check_reward_term_exists(task_name: str) -> bool:
-    """Verify the foothold_proximity reward term exists in the env."""
-    try:
-        import gymnasium as gym
-        from isaaclab_tasks.utils import parse_env_cfg
-    except ImportError:
-        return False
-
-    try:
-        env_cfg = parse_env_cfg(task_name, device="cuda:0", num_envs=4)
-        env_cfg.scene.num_envs = 4
-        if hasattr(env_cfg.scene, "camera"):
-            env_cfg.scene.camera = None
-        env = gym.make(task_name, cfg=env_cfg)
-
         reward_mgr = env.unwrapped.reward_manager
         term_names = getattr(reward_mgr, "_term_names", [])
         has_term = "foothold_proximity" in term_names
         _print_result("1.2", "foothold_proximity term exists", has_term,
-                      f"available terms: {term_names}")
-        env.close()
+                      f"terms: {term_names}")
         return has_term
     except Exception as e:
         _print_result("1.2", "foothold_proximity term check", False, str(e)[:150])
@@ -351,78 +327,68 @@ def check_reward_term_exists(task_name: str) -> bool:
 # Phase 2: PlannerInjector integration test
 # ==========================================================================
 
-def check_injector(task_name: str) -> bool:
-    """Test that PlannerInjector can swap the planner and restore it."""
+def check_injector(env) -> bool:
+    """Test that PlannerInjector can swap the planner and restore it
+    (env already created and wrapped)."""
     try:
-        import gymnasium as gym
-        import torch
-        from isaaclab_tasks.utils import parse_env_cfg
-        from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
         from scripts.optuna_tune_planner.config import DEFAULT_PARAMS
         from scripts.optuna_tune_planner.injector import PlannerInjector
-        from instinctlab.tasks.parkour.mdp.dcm_planner import DCMFootholdPlanner
     except ImportError as e:
         _print_result("2.0", "injector imports", False, str(e))
         return False
 
     ok = True
-    env_cfg = parse_env_cfg(task_name, device="cuda:0", num_envs=4)
-    env_cfg.scene.num_envs = 4
-    if hasattr(env_cfg.scene, "camera"):
-        env_cfg.scene.camera = None
-    env = gym.make(task_name, cfg=env_cfg)
-    env = InstinctRlVecEnvWrapper(env)
+    reward_mgr = env.unwrapped.reward_manager
+    term_names = getattr(reward_mgr, "_term_names", [])
 
     try:
-        # --- Test 1: enter swaps the planner ---
-        reward_mgr = env.unwrapped.reward_manager
-        term_idx = reward_mgr._term_names.index("foothold_proximity")
-        original_planner = reward_mgr._terms[term_idx]._planner
+        term_idx = term_names.index("foothold_proximity")
+    except ValueError:
+        _print_result("2.0", "find foothold_proximity term", False)
+        return False
 
-        # Modify one parameter to a value we can verify.
-        test_params = DEFAULT_PARAMS.copy()
-        test_params["alpha_pos"] = 9.99  # deliberately obvious
+    original_planner = reward_mgr._terms[term_idx]._planner
 
-        with PlannerInjector(env, test_params) as inj:
-            new_planner = reward_mgr._terms[term_idx]._planner
-            if new_planner is not original_planner:
-                _print_result("2.1", "planner swapped on enter", True)
-            else:
-                _print_result("2.1", "planner swapped on enter", False, "same object")
-                ok = False
+    # --- Test 1: enter swaps the planner ---
+    test_params = DEFAULT_PARAMS.copy()
+    test_params["alpha_pos"] = 9.99  # deliberately obvious
 
-            if abs(new_planner.alpha_pos - 9.99) < 0.001:
-                _print_result("2.1", f"custom alpha_pos={new_planner.alpha_pos}", True)
-            else:
-                _print_result("2.1", "custom alpha_pos applied", False,
-                              f"expected 9.99, got {new_planner.alpha_pos}")
-                ok = False
-
-        # --- Test 2: exit restores original ---
-        restored_planner = reward_mgr._terms[term_idx]._planner
-        if restored_planner is original_planner:
-            _print_result("2.2", "planner restored on exit", True)
+    with PlannerInjector(env, test_params):
+        new_planner = reward_mgr._terms[term_idx]._planner
+        if new_planner is not original_planner:
+            _print_result("2.1", "planner swapped on enter", True)
         else:
-            _print_result("2.2", "planner restored on exit", False, "different object")
+            _print_result("2.1", "planner swapped on enter", False, "same object")
             ok = False
 
-        # --- Test 3: exception safety (exit still runs) ---
-        cleanup_ran = False
-        try:
-            with PlannerInjector(env, test_params):
-                cleanup_ran = True
-                raise RuntimeError("simulated error inside injector block")
-        except RuntimeError:
-            pass
-        final_planner = reward_mgr._terms[term_idx]._planner
-        if final_planner is original_planner and cleanup_ran:
-            _print_result("2.3", "exception-safe restore", True)
+        if abs(new_planner.alpha_pos - 9.99) < 0.001:
+            _print_result("2.1", f"custom alpha_pos={new_planner.alpha_pos}", True)
         else:
-            _print_result("2.3", "exception-safe restore", False)
+            _print_result("2.1", "custom alpha_pos applied", False,
+                          f"expected 9.99, got {new_planner.alpha_pos}")
             ok = False
 
-    finally:
-        env.close()
+    # --- Test 2: exit restores original ---
+    restored_planner = reward_mgr._terms[term_idx]._planner
+    if restored_planner is original_planner:
+        _print_result("2.2", "planner restored on exit", True)
+    else:
+        _print_result("2.2", "planner restored on exit", False, "different object")
+        ok = False
+
+    # --- Test 3: exception safety (exit still runs) ---
+    try:
+        with PlannerInjector(env, test_params):
+            raise RuntimeError("simulated error inside injector block")
+    except RuntimeError:
+        pass  # expected — injector should still restore planner
+    final_planner = reward_mgr._terms[term_idx]._planner
+    if final_planner is original_planner:
+        _print_result("2.3", "exception-safe restore", True)
+    else:
+        _print_result("2.3", "exception-safe restore", False)
+        ok = False
+
     return ok
 
 
@@ -572,15 +538,27 @@ def main() -> None:
         ok = check_isaac_imports()[0]
         results.append(("isaac-imports", ok, False))
 
-        ok = check_env_creation(args_cli.task)
-        results.append(("env-creation", ok, False))
+        # Create ONE shared environment for Phase 1-2 checks.
+        env, env_ok, _ = _create_shared_env(args_cli.task)
+        results.append(("env-creation", env_ok, False))
 
-        ok = check_reward_term_exists(args_cli.task)
-        results.append(("reward-term", ok, False))
+        if env is not None:
+            term_ok = check_reward_term_exists(env)
+            results.append(("reward-term", term_ok, False))
 
-        ok = check_injector(args_cli.task)
-        results.append(("injector", ok, False))
+            injector_ok = check_injector(env)
+            results.append(("injector", injector_ok, False))
 
+            # Close the shared env after Phase 1-2 checks are done.
+            try:
+                env.close()
+            except Exception:
+                pass
+        else:
+            results.append(("reward-term", False, False))
+            results.append(("injector", False, False))
+
+        # Phase 3 uses its own evaluator (different num_envs + loads policy).
         if args_cli.checkpoint and os.path.isfile(args_cli.checkpoint):
             ok = check_rollout(args_cli.task, args_cli.checkpoint)
             results.append(("rollout", ok, False))
