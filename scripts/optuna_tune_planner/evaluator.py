@@ -64,6 +64,7 @@ class PlannerEvaluator:
         """
         self._cfg = cfg
         self._device = cfg.device
+        self._task_name = task_name
 
         self._env = self._create_env(task_name)
         self._policy = self._load_policy(checkpoint_path)
@@ -193,15 +194,13 @@ class PlannerEvaluator:
             A callable ``policy(obs: torch.Tensor) -> torch.Tensor``.
         """
         from instinct_rl.runners import OnPolicyRunner
+        from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
-        # We use a minimal runner config — only the algorithm class name and
-        # device matter for loading the network weights.  The actual training
-        # hyper-parameters (lr, gamma, etc.) are irrelevant for inference.
-        from instinctlab.utils.wrappers.instinct_rl import InstinctRlOnPolicyRunnerCfg
-
-        # Build a scratch config by introspecting the environment.
-        obs_dict, _ = self._env.get_observations()
-        agent_cfg = InstinctRlOnPolicyRunnerCfg()
+        # Load the full agent config from the task registry.  A minimal
+        # scratch config is not sufficient — instinct_rl's OnPolicyRunner
+        # requires the algorithm class_name and policy/algorithm sub-configs
+        # to correctly reconstruct the network architecture.
+        agent_cfg = load_cfg_from_registry(self._task_name, "instinct_rl_cfg_entry_point")
         agent_cfg.device = self._device
 
         # Create runner and load checkpoint.

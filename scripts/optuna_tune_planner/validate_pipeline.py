@@ -643,13 +643,15 @@ def _check_rollout_on_env(env, checkpoint_path: str, task_name: str) -> bool:
         from scripts.optuna_tune_planner.injector import PlannerInjector
         from scripts.optuna_tune_planner.metrics import MetricsAccumulator
         from instinct_rl.runners import OnPolicyRunner
-        from instinctlab.utils.wrappers.instinct_rl import InstinctRlOnPolicyRunnerCfg
+        from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
         cfg = EvalConfig()
 
-        # ---- Load policy into a runner ----
-        agent_cfg = InstinctRlOnPolicyRunnerCfg()
+        # ---- Load agent config from the task registry (like train.py does) ----
+        agent_cfg = load_cfg_from_registry(task_name, "instinct_rl_cfg_entry_point")
         agent_cfg.device = str(env.device)
+
+        # ---- Load policy into a runner ----
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None,
                                 device=agent_cfg.device)
         runner.load(checkpoint_path)
