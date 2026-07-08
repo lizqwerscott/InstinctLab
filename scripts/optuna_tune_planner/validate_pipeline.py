@@ -556,53 +556,145 @@ def main() -> None:
     app_launcher = AppLauncher(args_cli)
     simulation_app = app_launcher.app
 
-    # Now it is safe to import pxr / instinctlab / gym.
-    # Import instinctlab.tasks to register gym environments.
     import gymnasium as gym
-    import instinctlab.tasks  # noqa: F401 — side-effect: registers envs
+    import instinctlab.tasks  # noqa: F401 — register envs
 
+    # ---- Check imports ----
+    ok = check_isaac_imports()[0]
+    results.append(("isaac-imports", ok, False))
+
+    # ==================================================================
+    # KEY INSIGHT:  Isaac Lab's configclass has a bug where gym.make
+    # can only be called ONCE per process.  The second call triggers
+    # infinite recursion in cfg.validate() regardless of recursion
+    # limits or monkey-patches.
+    #
+    # Therefore we create exactly ONE environment and run ALL checks
+    # on it.  If a checkpoint is provided, the environment uses more
+    # envs for the rollout check; otherwise a minimal env suffices.
+    # ==================================================================
+
+    has_checkpoint = args_cli.checkpoint and os.path.isfile(args_cli.checkpoint)
+    num_envs = 64 if has_checkpoint else 4
+
+    # ---- Create the ONE and ONLY environment ----
+    env = None
     try:
-        ok = check_isaac_imports()[0]
-        results.append(("isaac-imports", ok, False))
+        from isaaclab_tasks.utils import parse_env_cfg
+        from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
 
-        # Create ONE shared environment for Phase 1-2 checks.
-        # Save the config to pass to Phase 3 (avoids second parse_env_cfg).
-        env, shared_env_cfg, env_ok, _ = _create_shared_env(args_cli.task)
-        results.append(("env-creation", env_ok, False))
+        env_cfg = parse_env_cfg(args_cli.task, device="cuda:0", num_envs=num_envs)
+        env_cfg.scene.num_envs = num_envs
+        env = gym.make(args_cli.task, cfg=env_cfg)
+        _print_result("env", "gym.make", True, f"num_envs={env.unwrapped.num_envs}")
 
-        if env is not None:
-            term_ok = check_reward_term_exists(env)
-            results.append(("reward-term", term_ok, False))
+        env = InstinctRlVecEnvWrapper(env)
+        obs, _ = env.get_observations()
+        obs_shape = tuple(obs.shape) if hasattr(obs, 'shape') else type(obs).__name__
+        _print_result("env", "InstinctRlVecEnvWrapper", True, f"obs shape={obs_shape}")
+        results.append(("env-creation", True, False))
 
-            injector_ok = check_injector(env)
-            results.append(("injector", injector_ok, False))
+        # ---- Check 1: reward term exists ----
+        term_ok = check_reward_term_exists(env)
+        results.append(("reward-term", term_ok, False))
 
-            # Close the shared env after Phase 1-2 checks are done.
-            try:
-                env.close()
-            except Exception:
-                pass
-        else:
-            results.append(("reward-term", False, False))
-            results.append(("injector", False, False))
+        # ---- Check 2: planner injection works ----
+        injector_ok = check_injector(env)
+        results.append(("injector", injector_ok, False))
 
-        # Phase 3 uses its own evaluator (different num_envs + loads policy).
-        # We pass the pre-parsed config to avoid a second parse_env_cfg call.
-        if args_cli.checkpoint and os.path.isfile(args_cli.checkpoint):
-            ok = check_rollout(args_cli.task, args_cli.checkpoint,
-                               env_cfg=shared_env_cfg)
-            results.append(("rollout", ok, False))
+        # ---- Check 3: rollout (only if checkpoint provided) ----
+        if has_checkpoint:
+            rollout_ok = _check_rollout_on_env(env, args_cli.checkpoint, args_cli.task)
+            results.append(("rollout", rollout_ok, False))
         elif args_cli.checkpoint:
             print(f"\n  {_color(SKIP, 'yellow')} Checkpoint not found: {args_cli.checkpoint}")
             results.append(("rollout", False, True))
         else:
-            print(f"\n  {_color(SKIP, 'yellow')} Phase 3 skipped (no --checkpoint provided)")
+            print(f"\n  {_color(SKIP, 'yellow')} Rollout check skipped (no --checkpoint)")
             results.append(("rollout", False, True))
+
+    except Exception as e:
+        _print_result("env", "creation", False, str(e)[:200])
+        results.append(("env-creation", False, False))
+        results.append(("reward-term", False, False))
+        results.append(("injector", False, False))
+        results.append(("rollout", False, False))
     finally:
-        # Always close the simulation app.
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
         simulation_app.close()
 
     _print_summary(results, 0, 0)
+
+
+def _check_rollout_on_env(env, checkpoint_path: str, task_name: str) -> bool:
+    """Run a short rollout on an already-created environment.
+
+    This avoids calling ``gym.make`` a second time (which triggers the
+    configclass recursion bug in Isaac Lab).
+    """
+    try:
+        import numpy as np
+        import torch
+        from scripts.optuna_tune_planner.config import DEFAULT_PARAMS, EvalConfig
+        from scripts.optuna_tune_planner.injector import PlannerInjector
+        from scripts.optuna_tune_planner.metrics import MetricsAccumulator
+        from instinct_rl.runners import OnPolicyRunner
+        from instinctlab.utils.wrappers.instinct_rl import InstinctRlOnPolicyRunnerCfg
+
+        cfg = EvalConfig()
+
+        # ---- Load policy into a runner ----
+        agent_cfg = InstinctRlOnPolicyRunnerCfg()
+        agent_cfg.device = str(env.device)
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None,
+                                device=agent_cfg.device)
+        runner.load(checkpoint_path)
+        policy = runner.get_inference_policy(device=agent_cfg.device)
+        _print_result("3.1", "policy loaded", True)
+
+        # ---- Run a short rollout with baseline params ----
+        accum = MetricsAccumulator(cfg)
+        obs, _ = env.get_observations()
+
+        with PlannerInjector(env, DEFAULT_PARAMS):
+            for step in range(50):
+                with torch.inference_mode():
+                    actions = policy(obs)
+                obs, rewards, dones, infos = env.step(actions)
+
+                # Extract per-step metrics (same pattern as evaluator)
+                reward_mgr = env.unwrapped.reward_manager
+                term_rewards = getattr(reward_mgr, "_termwise_reward_buf", {})
+                foothold_r = np.zeros(env.num_envs, dtype=np.float32)
+                for gname, terms in term_rewards.items():
+                    if "foothold_proximity" in terms:
+                        foothold_r = terms["foothold_proximity"].cpu().numpy()
+                        break
+
+                # Simple tracking error approximation
+                asset = env.unwrapped.scene["robot"]
+                cmd_vel = env.unwrapped.command_manager.get_command("base_velocity")
+                actual = asset.data.root_lin_vel_b[:, :2]
+                tracking_err = torch.norm(cmd_vel[:, :2] - actual, dim=1).cpu().numpy()
+
+                accum.update(
+                    foothold_reward=foothold_r,
+                    tracking_error=tracking_err,
+                    foot_slip=np.zeros(env.num_envs, dtype=np.float32),
+                    done_mask=dones.cpu().numpy() if isinstance(dones, torch.Tensor) else np.array(dones),
+                )
+
+        score = accum.compute_score()
+        _print_result("3.2", "rollout complete", True, f"score={score:.4f}")
+        return True
+
+    except Exception as e:
+        _print_result("3.1", "rollout check", False, str(e)[:200])
+        return False
 
 
 def _print_summary(
