@@ -277,9 +277,9 @@ def check_isaac_imports() -> Tuple[bool, bool]:
 def _create_shared_env(task_name: str):
     """Create and wrap a single environment, shared by Phase 1-2 checks.
 
-    Only ONE environment is created per validation run to avoid the
-    configclass recursion issue when parse_env_cfg is called repeatedly.
-    Returns (env, ok_flag, error_message).
+    Only ONE ``parse_env_cfg`` call is made per validation run to avoid the
+    configclass recursion issue.  Returns (env, env_cfg, ok_flag, msg).
+    The caller can reuse ``env_cfg`` (with modified num_envs) for Phase 3.
     """
     try:
         import gymnasium as gym
@@ -306,14 +306,14 @@ def _create_shared_env(task_name: str):
         obs_shape = tuple(obs.shape) if hasattr(obs, 'shape') else type(obs).__name__
         _print_result("1.1", "InstinctRlVecEnvWrapper", True,
                       f"obs shape={obs_shape}")
-        return env, True, ""
+        return env, env_cfg, True, ""
 
     except ImportError as e:
         _print_result("1.1", "imports", False, str(e))
-        return None, False, str(e)
+        return None, None, False, str(e)
     except Exception as e:
         _print_result("1.1", "env creation", False, str(e)[:200])
-        return None, False, str(e)
+        return None, None, False, str(e)
 
 
 def check_reward_term_exists(env) -> bool:
@@ -422,7 +422,8 @@ def check_injector(env) -> bool:
 # Phase 3: Full rollout test (requires checkpoint)
 # ==========================================================================
 
-def check_rollout(task_name: str, checkpoint_path: str, num_envs: int = 16) -> bool:
+def check_rollout(task_name: str, checkpoint_path: str,
+                  num_envs: int = 16, env_cfg=None) -> bool:
     """Run a short rollout with the baseline planner and verify metrics come out."""
     try:
         import numpy as np
@@ -440,7 +441,7 @@ def check_rollout(task_name: str, checkpoint_path: str, num_envs: int = 16) -> b
 
     # 3.1 Create evaluator (loads env + policy)
     try:
-        evaluator = PlannerEvaluator(cfg, task_name, checkpoint_path)
+        evaluator = PlannerEvaluator(cfg, task_name, checkpoint_path, env_cfg=env_cfg)
         _print_result("3.1", "PlannerEvaluator created", True)
     except Exception as e:
         _print_result("3.1", "PlannerEvaluator created", False, str(e)[:200])
@@ -565,7 +566,8 @@ def main() -> None:
         results.append(("isaac-imports", ok, False))
 
         # Create ONE shared environment for Phase 1-2 checks.
-        env, env_ok, _ = _create_shared_env(args_cli.task)
+        # Save the config to pass to Phase 3 (avoids second parse_env_cfg).
+        env, shared_env_cfg, env_ok, _ = _create_shared_env(args_cli.task)
         results.append(("env-creation", env_ok, False))
 
         if env is not None:
@@ -585,8 +587,10 @@ def main() -> None:
             results.append(("injector", False, False))
 
         # Phase 3 uses its own evaluator (different num_envs + loads policy).
+        # We pass the pre-parsed config to avoid a second parse_env_cfg call.
         if args_cli.checkpoint and os.path.isfile(args_cli.checkpoint):
-            ok = check_rollout(args_cli.task, args_cli.checkpoint)
+            ok = check_rollout(args_cli.task, args_cli.checkpoint,
+                               env_cfg=shared_env_cfg)
             results.append(("rollout", ok, False))
         elif args_cli.checkpoint:
             print(f"\n  {_color(SKIP, 'yellow')} Checkpoint not found: {args_cli.checkpoint}")

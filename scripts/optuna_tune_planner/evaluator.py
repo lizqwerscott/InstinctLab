@@ -51,26 +51,24 @@ class PlannerEvaluator:
         cfg: EvalConfig,
         task_name: str,
         checkpoint_path: str,
+        env_cfg=None,  # pre-built config avoids parse_env_cfg recursion
     ) -> None:
         """Initialise the environment and load the frozen policy.
 
         Args:
-            cfg:  Evaluation configuration (num_envs, rollout_steps, etc.).
-            task_name:  Gym task id, e.g. ``"Instinct-Parkour-Target-Amp-G1-v0"``.
-            checkpoint_path:  Path to a ``.pt`` checkpoint from instinct_rl
-                training (contains the actor-critic weights).
+            cfg:  Evaluation configuration.
+            task_name:  Gym task id.
+            checkpoint_path:  Path to a .pt checkpoint.
+            env_cfg:  Optional pre-built env config.  If None, parsed from
+                task_name (which may trigger recursion on some versions).
         """
         self._cfg = cfg
         self._device = cfg.device
 
         # ------------------------------------------------------------------
-        # 1. Create the evaluation environment (with reduced sensor load)
+        # 1. Create the evaluation environment
         # ------------------------------------------------------------------
-        # We parse the default environment config and then strip out
-        # expensive components that the frozen policy doesn't need during
-        # evaluation (e.g. AMP discriminator, visual sensors, excessive
-        # env counts).
-        self._env = self._create_env(task_name)
+        self._env = self._create_env(task_name, env_cfg=env_cfg)
 
         # ------------------------------------------------------------------
         # 2. Load the frozen policy
@@ -143,29 +141,24 @@ class PlannerEvaluator:
     # Environment creation
     # ==================================================================
 
-    def _create_env(self, task_name: str) -> InstinctRlVecEnvWrapper:
+    def _create_env(self, task_name: str, env_cfg=None) -> InstinctRlVecEnvWrapper:
         """Build a lightweight evaluation environment.
 
-        We start from the task's default config and then:
-          - Reduce ``num_envs`` to speed up rollouts.
-          - Shorten the episode so terminations recycle environments faster.
-          - Remove camera / noisy-depth sensors (the frozen policy may not
-            need them, and they are expensive to render).
-          - Disable domain randomisation that adds variance unrelated to
-            planner quality.
+        If ``env_cfg`` is provided it is used directly (must already have
+        ``num_envs`` set).  Otherwise the config is parsed from ``task_name``.
         """
         import sys
         _old_recursion_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(_old_recursion_limit, 5000))
 
-        from isaaclab_tasks.utils import parse_env_cfg
-
         try:
-            env_cfg = parse_env_cfg(
-                task_name,
-                device=self._device,
-                num_envs=self._cfg.num_envs,
-            )
+            if env_cfg is None:
+                from isaaclab_tasks.utils import parse_env_cfg
+                env_cfg = parse_env_cfg(
+                    task_name,
+                    device=self._device,
+                    num_envs=self._cfg.num_envs,
+                )
 
             # ---- Scale down for fast evaluation ----
             env_cfg.scene.num_envs = self._cfg.num_envs
