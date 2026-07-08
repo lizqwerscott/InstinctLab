@@ -56,7 +56,7 @@ class PlannerEvaluator:
 
         Args:
             cfg:  Evaluation configuration (num_envs, rollout_steps, etc.).
-            task_name:  Gym task id, e.g. ``"Instinct-Parkour-G1-v0"``.
+            task_name:  Gym task id, e.g. ``"Instinct-Parkour-Target-Amp-G1-v0"``.
             checkpoint_path:  Path to a ``.pt`` checkpoint from instinct_rl
                 training (contains the actor-critic weights).
         """

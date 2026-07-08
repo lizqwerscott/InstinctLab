@@ -5,7 +5,7 @@ tune_planner.py — Bayesian optimisation of DCMFootholdPlanner cost weights.
 Run with::
 
     python scripts/optuna_tune_planner/tune_planner.py \\
-        --task Instinct-Parkour-G1-v0 \\
+        --task Instinct-Parkour-Target-Amp-G1-v0 \\
         --checkpoint /path/to/model.pt \\
         --n_trials 100
 
@@ -38,7 +38,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--task",
     type=str,
-    default="Instinct-Parkour-G1-v0",
+    default="Instinct-Parkour-Target-Amp-G1-v0",
     help="Gym task id (must be a parkour variant with foothold_proximity reward).",
 )
 parser.add_argument(

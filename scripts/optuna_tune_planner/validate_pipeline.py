@@ -16,7 +16,7 @@ Usage::
     # Full validation (requires Isaac Sim + a trained checkpoint)
     python3 scripts/optuna_tune_planner/validate_pipeline.py \\
         --checkpoint /path/to/model_5000.pt \\
-        --task Instinct-Parkour-G1-v0 \\
+        --task Instinct-Parkour-Target-Amp-G1-v0 \\
         --headless
 """
 
@@ -503,7 +503,7 @@ def main() -> None:
         help="Path to a trained .pt checkpoint (required for Phase 3).",
     )
     parser.add_argument(
-        "--task", type=str, default="Instinct-Parkour-G1-v0",
+        "--task", type=str, default="Instinct-Parkour-Target-Amp-G1-v0",
         help="Gym task id.",
     )
     parser.add_argument(
