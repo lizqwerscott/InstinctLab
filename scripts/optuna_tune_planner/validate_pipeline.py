@@ -507,10 +507,18 @@ def main() -> None:
         help="Gym task id.",
     )
     parser.add_argument(
-        "--headless", action="store_true", default=False,
-        help="Pass to Isaac Sim AppLauncher.",
+        "--online", action="store_true", default=False,
+        help="Run Phase 1-3 checks (requires Isaac Sim).",
     )
-    args_cli = parser.parse_args()
+    # ----------------------------------------------------------------
+    # Isaac Sim AppLauncher args — only added when isaaclab is installed.
+    # ----------------------------------------------------------------
+    try:
+        from isaaclab.app import AppLauncher as _AppLauncher
+        _AppLauncher.add_app_launcher_args(parser)
+    except ImportError:
+        pass  # isaaclab not installed — AppLauncher args are not available
+    args_cli, _ = parser.parse_known_args()
 
     # ==================================================================
     # Header
@@ -538,17 +546,29 @@ def main() -> None:
     results.append(("metrics", ok, False))
 
     # ==================================================================
-    # Phase 1 & 2: Isaac Sim (only if available)
+    # Phase 1-3: Online checks (require Isaac Sim running)
     # ==================================================================
-    isaac_available = False
-    try:
-        import isaaclab  # noqa: F401
-        isaac_available = True
-    except ImportError:
-        pass
+    if not args_cli.online:
+        print(f"\n  {_color(SKIP, 'yellow')} Phase 1-3 skipped (add --online to run Isaac Sim checks)")
+        results.append(("isaac-imports", False, True))
+        results.append(("env-creation", False, True))
+        results.append(("reward-term", False, True))
+        results.append(("injector", False, True))
+        results.append(("rollout", False, True))
+        _print_summary(results, 0, 5)
+        return
 
-    if isaac_available:
-        # If checkpoint not provided, we still test env + injector
+    # ---- Start Isaac Sim first (like train.py does) ----
+    from isaaclab.app import AppLauncher
+    app_launcher = AppLauncher(args_cli)
+    simulation_app = app_launcher.app
+
+    # Now it is safe to import pxr / instinctlab / gym.
+    # Import instinctlab.tasks to register gym environments.
+    import gymnasium as gym
+    import instinctlab.tasks  # noqa: F401 — side-effect: registers envs
+
+    try:
         ok = check_isaac_imports()[0]
         results.append(("isaac-imports", ok, False))
 
@@ -570,17 +590,19 @@ def main() -> None:
         else:
             print(f"\n  {_color(SKIP, 'yellow')} Phase 3 skipped (no --checkpoint provided)")
             results.append(("rollout", False, True))
-    else:
-        print(f"\n  {_color(SKIP, 'yellow')} Phase 1-3 skipped (Isaac Lab not available in this environment)")
-        results.append(("isaac-checks", False, True))
-        results.append(("env-creation", False, True))
-        results.append(("reward-term", False, True))
-        results.append(("injector", False, True))
-        results.append(("rollout", False, True))
+    finally:
+        # Always close the simulation app.
+        simulation_app.close()
 
-    # ==================================================================
-    # Summary
-    # ==================================================================
+    _print_summary(results, 0, 0)
+
+
+def _print_summary(
+    results: List[Tuple[str, bool, bool]],
+    _unused_pass: int,
+    _unused_skip: int,
+) -> None:
+    """Print the final summary table and exit with appropriate code."""
     print("\n" + "=" * 60)
     print("  VALIDATION SUMMARY")
     print("=" * 60)
@@ -603,9 +625,8 @@ def main() -> None:
     if n_fail > 0:
         print(f"\n  {_color('Some checks FAILED. Review the output above.', 'red')}")
         sys.exit(1)
-    elif n_pass == 0 and n_skip > 0:
-        print(f"\n  {_color('All online checks skipped. Run on a machine with Isaac Lab to complete validation.', 'yellow')}")
-        print(f"  To install Optuna (offline check dependency): pip install optuna")
+    elif n_skip > 0 and n_pass > 0:
+        print(f"\n  {_color('Offline checks passed. Run with --online --checkpoint <path> for full validation.', 'yellow')}")
     else:
         print(f"\n  {_color('All checks passed!', 'green')}")
         print(f"  Ready to run: python scripts/optuna_tune_planner/tune_planner.py --checkpoint ...")
