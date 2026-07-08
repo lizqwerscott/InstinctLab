@@ -152,15 +152,18 @@ class MetricsAccumulator:
         self._step_count += 1
         n_envs = len(foothold_reward)
 
-        # Convert to numpy arrays if needed.
-        if not isinstance(foothold_reward, np.ndarray):
-            foothold_reward = np.asarray(foothold_reward)
-        if not isinstance(tracking_error, np.ndarray):
-            tracking_error = np.asarray(tracking_error)
-        if not isinstance(foot_slip, np.ndarray):
-            foot_slip = np.asarray(foot_slip)
-        if not isinstance(done_mask, np.ndarray):
-            done_mask = np.asarray(done_mask)
+        # Convert to numpy arrays if needed (handles GPU tensors).
+        def _to_numpy(arr):
+            if isinstance(arr, np.ndarray):
+                return arr
+            if hasattr(arr, 'cpu'):
+                return arr.cpu().numpy()
+            return np.asarray(arr)
+
+        foothold_reward = _to_numpy(foothold_reward)
+        tracking_error = _to_numpy(tracking_error)
+        foot_slip = _to_numpy(foot_slip)
+        done_mask = _to_numpy(done_mask)
 
         # Filter out NaN values (can occur when a sensor misses).
         valid = (
