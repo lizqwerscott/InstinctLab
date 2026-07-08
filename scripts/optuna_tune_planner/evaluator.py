@@ -65,29 +65,24 @@ class PlannerEvaluator:
         self._cfg = cfg
         self._device = cfg.device
 
-        # ---- Raise recursion limit for the ENTIRE init sequence ----
-        # configclass validation can recurse deeply; 5000 is enough for
-        # all known Isaac Lab config trees.
         import sys
         _old_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(_old_limit, 5000))
         try:
-            # --------------------------------------------------------------
-            # 1. Create the evaluation environment
-            # --------------------------------------------------------------
+            print("[DIAG] Step 1/3: _create_env ...")
             self._env = self._create_env(task_name, env_cfg=env_cfg)
+            print("[DIAG] Step 1/3: OK")
 
-            # --------------------------------------------------------------
-            # 2. Load the frozen policy
-            # --------------------------------------------------------------
+            print("[DIAG] Step 2/3: _load_policy ...")
             self._policy = self._load_policy(checkpoint_path)
+            print("[DIAG] Step 2/3: OK")
 
-            # --------------------------------------------------------------
-            # 3. Bootstrap the terrain-index → name mapping
-            # --------------------------------------------------------------
+            print("[DIAG] Step 3/3: _setup_terrain_mapping ...")
             self._setup_terrain_mapping()
+            print("[DIAG] Step 3/3: OK")
         finally:
             sys.setrecursionlimit(_old_limit)
+        print("[DIAG] __init__ complete")
 
     # ==================================================================
     # Public: evaluate one parameter set
