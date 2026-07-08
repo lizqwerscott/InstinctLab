@@ -444,8 +444,17 @@ class FootholdProximityReward(ManagerTermBase):
             self._p_star_cache[newly_uninitialized, 1] = body_pos[newly_uninitialized, 1]
             self._p_star_initialized[newly_uninitialized] = True
 
-        k = 0.15 / 0.45  # stair height / max stair height to climb
-        k = k * torch.ones(env.num_envs, device=env.device)
+        # ---- 动态 k：从高度图前方 fwd_dist 与中心的高度差除以 T ----
+        fwd_dist = 0.2  # 向前采样距离 (m)
+        h_safe = torch.where(torch.isnan(heightmap), torch.zeros_like(heightmap), heightmap)
+        row_c, col_c = heightmap.shape[1] // 2, heightmap.shape[2] // 2  # 中心 (y=0, x=0)
+        col_f = col_c + int(round(fwd_dist / self._planner.cell_size))   # 前方 fwd_dist
+        col_f = min(max(col_f, 1), heightmap.shape[2] - 2)               # clamp 防越界
+        center_patch = h_safe[:, row_c-1:row_c+2, col_c-1:col_c+2]       # (N, 3, 3)
+        fwd_patch    = h_safe[:, row_c-1:row_c+2, col_f-1:col_f+2]       # (N, 3, 3)
+        h_center = center_patch.mean(dim=(1, 2))                          # (N,)
+        h_fwd    = fwd_patch.mean(dim=(1, 2))                             # (N,)
+        k = (h_fwd - h_center) / self._planner.T
 
         # ---- 3b. Cache update: plan ONLY at swing onset for each foot ----
         # Left foot swing onset  → plan left-foot target (stance = right foot, sign = +1)
