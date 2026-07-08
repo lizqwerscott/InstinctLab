@@ -75,25 +75,59 @@ class PlannerInjector:
     def _find_term_instance(reward_mgr):
         """Locate the ``foothold_proximity`` term instance in the reward manager.
 
-        Different Isaac Lab versions use different internal attribute names.
-        We try every known pattern and return the first match, or ``None``.
+        Isaac Lab's standard ``RewardManager`` and InstinctLab's
+        ``MultiRewardManager`` use different internal attribute layouts.
+        We try all known patterns and return the first match, or ``None``.
         """
         term_name = PlannerInjector._TERM_NAME
-        # Path A: ``_term_names`` list + ``_terms`` list (most common).
-        term_names = getattr(reward_mgr, "_term_names", [])
-        terms_list = getattr(reward_mgr, "_terms", [])
-        if term_names and term_name in term_names and terms_list:
-            return terms_list[term_names.index(term_name)]
 
-        # Path B: ``_term_cfgs`` dict + ``_terms`` list (match by cfg identity).
+        # --- Pattern A: MultiRewardManager ---
+        # Terms are grouped: __group_term_names["rewards"] = [term_names...]
+        # Each term's config is in __group_term_cfgs["rewards"][idx].
+        # The live term instance is term_cfg.func (a ManagerTermBase).
+        for attr_prefix in ("_MultiRewardManager__group_term_names",
+                             "__group_term_names"):
+            group_names = getattr(reward_mgr, attr_prefix, None)
+            if isinstance(group_names, dict):
+                for gname, names in group_names.items():
+                    if term_name in names:
+                        idx = names.index(term_name)
+                        # Get the corresponding config.
+                        for cfg_attr in ("_MultiRewardManager__group_term_cfgs",
+                                          "__group_term_cfgs"):
+                            group_cfgs = getattr(reward_mgr, cfg_attr, None)
+                            if isinstance(group_cfgs, dict) and gname in group_cfgs:
+                                term_cfg = group_cfgs[gname][idx]
+                                if hasattr(term_cfg, "func") and hasattr(term_cfg.func, "_planner"):
+                                    return term_cfg.func
+                                # Also try __group_class_term_cfgs
+                                for cls_attr in ("_MultiRewardManager__group_class_term_cfgs",
+                                                  "__group_class_term_cfgs"):
+                                    cls_cfgs = getattr(reward_mgr, cls_attr, None)
+                                    if isinstance(cls_cfgs, dict) and gname in cls_cfgs:
+                                        for tc in cls_cfgs[gname]:
+                                            if hasattr(tc, "func") and hasattr(tc.func, "_planner"):
+                                                # Verify it's the right one by checking func class name
+                                                fname = type(tc.func).__name__
+                                                if "Foothold" in fname or "foothold" in fname.lower():
+                                                    return tc.func
+
+        # --- Pattern B: Standard RewardManager ---
+        # _term_names list + _terms list
+        std_names = getattr(reward_mgr, "_term_names", [])
+        std_terms = getattr(reward_mgr, "_terms", [])
+        if std_names and term_name in std_names and std_terms:
+            return std_terms[std_names.index(term_name)]
+
+        # _term_cfgs dict + _terms list (match by cfg identity)
         term_cfgs = getattr(reward_mgr, "_term_cfgs", {})
-        if term_name in term_cfgs and terms_list:
+        if term_name in term_cfgs and std_terms:
             target_cfg = term_cfgs[term_name]
-            for t in terms_list:
+            for t in std_terms:
                 if getattr(t, "cfg", None) is target_cfg:
                     return t
 
-        # Path C: term instances stored in a dict keyed by name.
+        # --- Pattern C: dict keyed by name ---
         for attr in ("_term_instances", "_live_terms", "_term_funcs"):
             d = getattr(reward_mgr, attr, None)
             if isinstance(d, dict) and term_name in d:

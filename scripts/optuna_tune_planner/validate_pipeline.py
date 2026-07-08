@@ -319,26 +319,27 @@ def _create_shared_env(task_name: str):
 def check_reward_term_exists(env) -> bool:
     """Verify the foothold_proximity reward term exists (env already created).
 
-    The reward manager stores term configurations in ``_term_cfgs`` (a dict
-    of RewardTermCfg keyed by name).  We check its keys rather than
-    ``_term_names`` (which can be empty before the first episode step).
+    Works with both the standard ``RewardManager`` and InstinctLab's
+    ``MultiRewardManager`` (which nests terms inside group dictionaries).
     """
     try:
         reward_mgr = env.unwrapped.reward_manager
 
-        # Try multiple introspection paths (different Isaac Lab versions use
-        # different internal attribute names).
-        term_names = []
-        for attr in ("_term_names", "_term_cfgs", "_grouped_term_cfgs"):
-            val = getattr(reward_mgr, attr, None)
-            if val is not None:
-                if isinstance(val, dict):
-                    term_names = list(val.keys())
-                elif isinstance(val, (list, tuple)):
-                    term_names = list(val)
-                if term_names:
-                    break
+        # --- MultiRewardManager path ---
+        # __group_term_names = {"rewards": ["term1", "term2", ...]}
+        for attr in ("_MultiRewardManager__group_term_names", "__group_term_names"):
+            group_names = getattr(reward_mgr, attr, None)
+            if isinstance(group_names, dict):
+                all_terms = []
+                for gname, names in group_names.items():
+                    all_terms.extend(names)
+                has_term = "foothold_proximity" in all_terms
+                _print_result("1.2", "foothold_proximity term exists", has_term,
+                              f"groups={list(group_names.keys())}, terms={all_terms}")
+                return has_term
 
+        # --- Standard RewardManager path ---
+        term_names = getattr(reward_mgr, "_term_names", [])
         has_term = "foothold_proximity" in term_names
         _print_result("1.2", "foothold_proximity term exists", has_term,
                       f"terms ({len(term_names)}): {term_names}")
@@ -365,37 +366,11 @@ def check_injector(env) -> bool:
     ok = True
     reward_mgr = env.unwrapped.reward_manager
 
-    # ---- Locate the foothold_proximity term instance ----
-    # Different Isaac Lab versions store terms in different internal attrs.
-    term_instance = None
-    term_names = getattr(reward_mgr, "_term_names", [])
-    terms_list = getattr(reward_mgr, "_terms", [])
-
-    # If _term_names is populated, find by position.
-    if term_names and "foothold_proximity" in term_names and terms_list:
-        term_idx = term_names.index("foothold_proximity")
-        term_instance = terms_list[term_idx]
-    # Fallback: search _term_cfgs dict.
-    if term_instance is None:
-        term_cfgs = getattr(reward_mgr, "_term_cfgs", {})
-        if "foothold_proximity" in term_cfgs and terms_list:
-            # Find matching index via cfg identity.
-            target_cfg = term_cfgs["foothold_proximity"]
-            for i, _term in enumerate(terms_list):
-                if getattr(_term, "cfg", None) is target_cfg:
-                    term_instance = _term
-                    break
-    # Another fallback: terms stored in a dict keyed by name.
-    if term_instance is None:
-        for attr_name in ("_term_instances", "_live_terms", "_term_funcs"):
-            d = getattr(reward_mgr, attr_name, None)
-            if isinstance(d, dict) and "foothold_proximity" in d:
-                term_instance = d["foothold_proximity"]
-                break
+    # Use the same multi-path search as the injector itself.
+    term_instance = PlannerInjector._find_term_instance(reward_mgr)
 
     if term_instance is None or not hasattr(term_instance, "_planner"):
-        _print_result("2.0", "find foothold_proximity term instance", False,
-                      f"term_names={term_names}")
+        _print_result("2.0", "find foothold_proximity term instance", False)
         return False
 
     original_planner = term_instance._planner
