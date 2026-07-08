@@ -150,15 +150,20 @@ class PlannerEvaluator:
         import sys
         _old_recursion_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(_old_recursion_limit, 5000))
+        print(f"[DIAG] _create_env: env_cfg is None = {env_cfg is None}, "
+              f"recursion_limit = {sys.getrecursionlimit()}")
 
         try:
             if env_cfg is None:
+                print("[DIAG] _create_env: calling parse_env_cfg (may recurse)")
                 from isaaclab_tasks.utils import parse_env_cfg
                 env_cfg = parse_env_cfg(
                     task_name,
                     device=self._device,
                     num_envs=self._cfg.num_envs,
                 )
+            else:
+                print("[DIAG] _create_env: using pre-built env_cfg, skipping parse_env_cfg")
 
             # ---- Scale down for fast evaluation ----
             env_cfg.scene.num_envs = self._cfg.num_envs
