@@ -287,23 +287,22 @@ def _create_shared_env(task_name: str):
         from isaaclab_tasks.utils import parse_env_cfg
         from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
 
+        # The entire env-creation chain (parse_env_cfg → gym.make →
+        # InstinctRlVecEnvWrapper) can trigger configclass validation
+        # recursion.  We raise the limit for the whole block.
         _old_limit = _sys.getrecursionlimit()
         _sys.setrecursionlimit(max(_old_limit, 5000))
         try:
             env_cfg = parse_env_cfg(task_name, device="cuda:0", num_envs=4)
+            env_cfg.scene.num_envs = 4
+            env = gym.make(task_name, cfg=env_cfg)
+            env = InstinctRlVecEnvWrapper(env)
         finally:
             _sys.setrecursionlimit(_old_limit)
-        env_cfg.scene.num_envs = 4
-        # Do NOT set camera=None — keeping the full config avoids
-        # configclass validation recursion and the overhead is negligible
-        # with only 4 environments.
 
-        env = gym.make(task_name, cfg=env_cfg)
         _print_result("1.1", "gym.make", True, f"num_envs={env.unwrapped.num_envs}")
 
-        env = InstinctRlVecEnvWrapper(env)
         obs, info = env.get_observations()
-        # Wrapper returns (tensor, dict), not (dict, ...) — obs is a flat tensor.
         obs_shape = tuple(obs.shape) if hasattr(obs, 'shape') else type(obs).__name__
         _print_result("1.1", "InstinctRlVecEnvWrapper", True,
                       f"obs shape={obs_shape}")
@@ -318,13 +317,31 @@ def _create_shared_env(task_name: str):
 
 
 def check_reward_term_exists(env) -> bool:
-    """Verify the foothold_proximity reward term exists (env already created)."""
+    """Verify the foothold_proximity reward term exists (env already created).
+
+    The reward manager stores term configurations in ``_term_cfgs`` (a dict
+    of RewardTermCfg keyed by name).  We check its keys rather than
+    ``_term_names`` (which can be empty before the first episode step).
+    """
     try:
         reward_mgr = env.unwrapped.reward_manager
-        term_names = getattr(reward_mgr, "_term_names", [])
+
+        # Try multiple introspection paths (different Isaac Lab versions use
+        # different internal attribute names).
+        term_names = []
+        for attr in ("_term_names", "_term_cfgs", "_grouped_term_cfgs"):
+            val = getattr(reward_mgr, attr, None)
+            if val is not None:
+                if isinstance(val, dict):
+                    term_names = list(val.keys())
+                elif isinstance(val, (list, tuple)):
+                    term_names = list(val)
+                if term_names:
+                    break
+
         has_term = "foothold_proximity" in term_names
         _print_result("1.2", "foothold_proximity term exists", has_term,
-                      f"terms: {term_names}")
+                      f"terms ({len(term_names)}): {term_names}")
         return has_term
     except Exception as e:
         _print_result("1.2", "foothold_proximity term check", False, str(e)[:150])
@@ -347,22 +364,48 @@ def check_injector(env) -> bool:
 
     ok = True
     reward_mgr = env.unwrapped.reward_manager
-    term_names = getattr(reward_mgr, "_term_names", [])
 
-    try:
+    # ---- Locate the foothold_proximity term instance ----
+    # Different Isaac Lab versions store terms in different internal attrs.
+    term_instance = None
+    term_names = getattr(reward_mgr, "_term_names", [])
+    terms_list = getattr(reward_mgr, "_terms", [])
+
+    # If _term_names is populated, find by position.
+    if term_names and "foothold_proximity" in term_names and terms_list:
         term_idx = term_names.index("foothold_proximity")
-    except ValueError:
-        _print_result("2.0", "find foothold_proximity term", False)
+        term_instance = terms_list[term_idx]
+    # Fallback: search _term_cfgs dict.
+    if term_instance is None:
+        term_cfgs = getattr(reward_mgr, "_term_cfgs", {})
+        if "foothold_proximity" in term_cfgs and terms_list:
+            # Find matching index via cfg identity.
+            target_cfg = term_cfgs["foothold_proximity"]
+            for i, _term in enumerate(terms_list):
+                if getattr(_term, "cfg", None) is target_cfg:
+                    term_instance = _term
+                    break
+    # Another fallback: terms stored in a dict keyed by name.
+    if term_instance is None:
+        for attr_name in ("_term_instances", "_live_terms", "_term_funcs"):
+            d = getattr(reward_mgr, attr_name, None)
+            if isinstance(d, dict) and "foothold_proximity" in d:
+                term_instance = d["foothold_proximity"]
+                break
+
+    if term_instance is None or not hasattr(term_instance, "_planner"):
+        _print_result("2.0", "find foothold_proximity term instance", False,
+                      f"term_names={term_names}")
         return False
 
-    original_planner = reward_mgr._terms[term_idx]._planner
+    original_planner = term_instance._planner
 
     # --- Test 1: enter swaps the planner ---
     test_params = DEFAULT_PARAMS.copy()
     test_params["alpha_pos"] = 9.99  # deliberately obvious
 
     with PlannerInjector(env, test_params):
-        new_planner = reward_mgr._terms[term_idx]._planner
+        new_planner = term_instance._planner
         if new_planner is not original_planner:
             _print_result("2.1", "planner swapped on enter", True)
         else:
@@ -377,7 +420,7 @@ def check_injector(env) -> bool:
             ok = False
 
     # --- Test 2: exit restores original ---
-    restored_planner = reward_mgr._terms[term_idx]._planner
+    restored_planner = term_instance._planner
     if restored_planner is original_planner:
         _print_result("2.2", "planner restored on exit", True)
     else:
@@ -390,7 +433,7 @@ def check_injector(env) -> bool:
             raise RuntimeError("simulated error inside injector block")
     except RuntimeError:
         pass  # expected — injector should still restore planner
-    final_planner = reward_mgr._terms[term_idx]._planner
+    final_planner = term_instance._planner
     if final_planner is original_planner:
         _print_result("2.3", "exception-safe restore", True)
     else:

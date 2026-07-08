@@ -71,6 +71,37 @@ class PlannerInjector:
         self._reward_term = None  # set in __enter__
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _find_term_instance(reward_mgr):
+        """Locate the ``foothold_proximity`` term instance in the reward manager.
+
+        Different Isaac Lab versions use different internal attribute names.
+        We try every known pattern and return the first match, or ``None``.
+        """
+        term_name = PlannerInjector._TERM_NAME
+        # Path A: ``_term_names`` list + ``_terms`` list (most common).
+        term_names = getattr(reward_mgr, "_term_names", [])
+        terms_list = getattr(reward_mgr, "_terms", [])
+        if term_names and term_name in term_names and terms_list:
+            return terms_list[term_names.index(term_name)]
+
+        # Path B: ``_term_cfgs`` dict + ``_terms`` list (match by cfg identity).
+        term_cfgs = getattr(reward_mgr, "_term_cfgs", {})
+        if term_name in term_cfgs and terms_list:
+            target_cfg = term_cfgs[term_name]
+            for t in terms_list:
+                if getattr(t, "cfg", None) is target_cfg:
+                    return t
+
+        # Path C: term instances stored in a dict keyed by name.
+        for attr in ("_term_instances", "_live_terms", "_term_funcs"):
+            d = getattr(reward_mgr, attr, None)
+            if isinstance(d, dict) and term_name in d:
+                return d[term_name]
+
+        return None
+
+    # ------------------------------------------------------------------
     def __enter__(self) -> "PlannerInjector":
         """Swap the foothold reward's planner for one with trial parameters.
 
@@ -83,25 +114,19 @@ class PlannerInjector:
         # Walk through the unwrapped environment chain:
         #   InstinctRlVecEnvWrapper → (gym Env) → ManagerBasedRLEnv
         unwrapped = self._env.unwrapped
-
-        # The reward manager stores configured terms in ``_term_cfgs`` (a dict
-        # of ``RewardTermCfg`` keyed by term name) and live term instances in
-        # ``_term_indices`` (term_name → index into the internal list).
         reward_mgr = unwrapped.reward_manager
-        term_names = getattr(reward_mgr, "_term_names", [])
 
-        if self._TERM_NAME not in term_names:
+        # ---- Locate the live term instance ----
+        # Isaac Lab stores reward terms in several internal attributes whose
+        # names vary across versions.  We try multiple paths in order.
+        term_instance = self._find_term_instance(reward_mgr)
+        if term_instance is None:
+            term_names = getattr(reward_mgr, "_term_names", [])
             raise RuntimeError(
-                f"Reward term '{self._TERM_NAME}' not found in the environment's "
-                f"reward manager. Available terms: {term_names}. "
+                f"Reward term '{self._TERM_NAME}' not found in the "
+                f"environment's reward manager. Available terms: {term_names}. "
                 f"Make sure the task is a parkour variant with foothold_proximity."
             )
-
-        # Locate the live term instance.
-        # Isaac Lab's RewardManager stores term instances in an internal
-        # list ``_terms``, indexed by their position in ``_term_names``.
-        term_idx = term_names.index(self._TERM_NAME)
-        term_instance = reward_mgr._terms[term_idx]
         self._reward_term = term_instance
 
         # Save the original planner so we can restore it on __exit__.

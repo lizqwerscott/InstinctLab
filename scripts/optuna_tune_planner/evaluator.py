@@ -166,48 +166,45 @@ class PlannerEvaluator:
                 device=self._device,
                 num_envs=self._cfg.num_envs,
             )
+
+            # ---- Scale down for fast evaluation ----
+            env_cfg.scene.num_envs = self._cfg.num_envs
+            env_cfg.episode_length_s = 20.0  # enough for a full traverse
+
+            # ---- Disable expensive visual sensors ----
+            if hasattr(env_cfg.scene, "camera"):
+                env_cfg.scene.camera = None
+
+            # ---- Reduce terrain curriculum (evaluate all levels at once) ----
+            if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
+                env_cfg.curriculum = None
+
+            # ---- Disable push-robot randomisation for lower variance ----
+            if hasattr(env_cfg.events, "push_robot"):
+                env_cfg.events.push_robot = None
+
+            # ---- Disable physics-material randomisation ----
+            if hasattr(env_cfg.events, "physics_material"):
+                env_cfg.events.physics_material = None
+
+            # ---- Ensure debug visualisation is off (saves GPU time) ----
+            for field_name in env_cfg.rewards.__dataclass_fields__:
+                if field_name == "rewards":
+                    rewards_cfg = getattr(env_cfg.rewards, field_name)
+                    for rew_field in rewards_cfg.__dataclass_fields__:
+                        rew_term = getattr(rewards_cfg, rew_field)
+                        if hasattr(rew_term, "params") and rew_term.params is not None:
+                            if "debug_vis" in rew_term.params:
+                                rew_term.params["debug_vis"] = False
+
+            # ---- Create gym environment ----
+            env = gym.make(task_name, cfg=env_cfg)
+
+            # ---- Wrap for instinct_rl interface ----
+            env = InstinctRlVecEnvWrapper(env)
+
         finally:
             sys.setrecursionlimit(_old_recursion_limit)
-
-        # ---- Scale down for fast evaluation ----
-        env_cfg.scene.num_envs = self._cfg.num_envs
-        env_cfg.episode_length_s = 20.0  # enough for a full traverse
-
-        # ---- Disable expensive visual sensors ----
-        # The parkour task defines a noisy depth camera for perceptive
-        # training.  The frozen AMP policy does not use it, so we can
-        # set it to None to skip the ray-casting work.
-        if hasattr(env_cfg.scene, "camera"):
-            env_cfg.scene.camera = None
-
-        # ---- Reduce terrain curriculum (evaluate all levels at once) ----
-        if hasattr(env_cfg, "curriculum") and env_cfg.curriculum is not None:
-            env_cfg.curriculum = None
-
-        # ---- Disable push-robot randomisation for lower variance ----
-        if hasattr(env_cfg.events, "push_robot"):
-            env_cfg.events.push_robot = None
-
-        # ---- Disable physics-material randomisation ----
-        if hasattr(env_cfg.events, "physics_material"):
-            env_cfg.events.physics_material = None
-
-        # ---- Ensure debug visualisation is off (saves GPU time) ----
-        # Walk through reward terms to disable foothold_proximity debug vis
-        for field_name in env_cfg.rewards.__dataclass_fields__:
-            if field_name == "rewards":
-                rewards_cfg = getattr(env_cfg.rewards, field_name)
-                for rew_field in rewards_cfg.__dataclass_fields__:
-                    rew_term = getattr(rewards_cfg, rew_field)
-                    if hasattr(rew_term, "params") and rew_term.params is not None:
-                        if "debug_vis" in rew_term.params:
-                            rew_term.params["debug_vis"] = False
-
-        # ---- Create gym environment ----
-        env = gym.make(task_name, cfg=env_cfg)
-
-        # ---- Wrap for instinct_rl interface ----
-        env = InstinctRlVecEnvWrapper(env)
 
         return env
 
