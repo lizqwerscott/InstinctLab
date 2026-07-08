@@ -25,9 +25,16 @@ from __future__ import annotations
 
 import argparse
 import os
+import os
 import sys
 import time
 from typing import Any, Dict, Tuple
+
+# Ensure the project root is on sys.path so that "from scripts.optuna_tune_planner.xxx"
+# imports work regardless of the current working directory.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 # ==========================================================================
 # Phase 0: parse CLI args *before* importing Isaac Sim
