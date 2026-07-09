@@ -668,27 +668,12 @@ def _check_rollout_on_env(env, checkpoint_path: str, task_name: str) -> bool:
                     actions = policy(obs)
                 obs, rewards, dones, infos = env.step(actions)
 
-                # Extract per-step metrics (same pattern as evaluator)
-                reward_mgr = env.unwrapped.reward_manager
-                term_rewards = getattr(reward_mgr, "_termwise_reward_buf", {})
-                foothold_r = np.zeros(env.num_envs, dtype=np.float32)
-                for gname, terms in term_rewards.items():
-                    if "foothold_proximity" in terms:
-                        foothold_r = terms["foothold_proximity"].cpu().numpy()
-                        break
-
-                # Simple tracking error approximation
-                asset = env.unwrapped.scene["robot"]
-                cmd_vel = env.unwrapped.command_manager.get_command("base_velocity")
-                actual = asset.data.root_lin_vel_b[:, :2]
-                tracking_err = torch.norm(cmd_vel[:, :2] - actual, dim=1).cpu().numpy()
-
-                accum.update(
-                    foothold_reward=foothold_r,
-                    tracking_error=tracking_err,
-                    foot_slip=np.zeros(env.num_envs, dtype=np.float32),
-                    done_mask=dones.cpu().numpy() if isinstance(dones, torch.Tensor) else np.array(dones),
+                # Compute ankle-corrected foothold score (same logic as evaluator)
+                foothold_score = _compute_foothold_score_for_env(
+                    env, sigma_p=cfg.sigma_p, ankle_offset=cfg.ankle_offset
                 )
+
+                accum.update(foothold_score=foothold_score)
 
         score = accum.compute_score()
         _print_result("3.2", "rollout complete", True, f"score={score:.4f}")
@@ -697,6 +682,62 @@ def _check_rollout_on_env(env, checkpoint_path: str, task_name: str) -> bool:
     except Exception as e:
         _print_result("3.1", "rollout check", False, str(e)[:200])
         return False
+
+
+def _compute_foothold_score_for_env(
+    env, sigma_p: float = 10.0, ankle_offset: float = 0.035
+) -> np.ndarray:
+    """Compute ankle-corrected foothold score for one step.
+
+    Same logic as ``PlannerEvaluator._get_ankle_corrected_foothold_score``,
+    extracted here so validate_pipeline can use it without a full evaluator.
+    """
+    import torch
+    from scripts.optuna_tune_planner.injector import PlannerInjector as _PI
+
+    unwrapped = env.unwrapped
+    asset = unwrapped.scene["robot"]
+    num_envs = unwrapped.num_envs
+
+    term_instance = _PI._find_term_instance(unwrapped.reward_manager)
+    if term_instance is None:
+        return np.zeros(num_envs, dtype=np.float32)
+
+    p_star_cache = getattr(term_instance, "_p_star_cache", None)
+    swing_planned = getattr(term_instance, "_swing_planned", None)
+    if p_star_cache is None or swing_planned is None:
+        return np.zeros(num_envs, dtype=np.float32)
+
+    foot_indices = [
+        asset.data.body_names.index(n)
+        for n in ["left_ankle_roll_link", "right_ankle_roll_link"]
+        if n in asset.data.body_names
+    ]
+    if len(foot_indices) < 2:
+        return np.zeros(num_envs, dtype=np.float32)
+
+    ankle_pos = asset.data.body_pos_w[:, foot_indices, :]
+    root_quat = asset.data.root_quat_w
+    w, x, y, z = root_quat[:, 0], root_quat[:, 1], root_quat[:, 2], root_quat[:, 3]
+    forward_xy = torch.stack([
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y + w * z),
+    ], dim=1)
+    forward_xy = forward_xy / (torch.norm(forward_xy, dim=1, keepdim=True) + 1e-8)
+    offset_xy = -ankle_offset * forward_xy
+
+    score = torch.zeros(num_envs, device=unwrapped.device)
+    for foot_idx in range(2):
+        mask = swing_planned[:, foot_idx]
+        if mask.any():
+            p_target = p_star_cache[mask, foot_idx]
+            p_foot = ankle_pos[mask, foot_idx]
+            p_corrected = p_target.clone()
+            p_corrected[:, :2] = p_target[:, :2] + offset_xy[mask]
+            dist = torch.norm(p_foot - p_corrected, dim=1)
+            score[mask] += torch.exp(-sigma_p * dist * dist)
+
+    return score.cpu().numpy() / 2.0
 
 
 def _print_summary(

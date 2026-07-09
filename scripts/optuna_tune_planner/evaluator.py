@@ -248,121 +248,95 @@ class PlannerEvaluator:
             # Step the simulation.
             obs, rewards, dones, infos = self._env.step(actions)
 
-            # ---- Extract per-step metrics ----
-            # 1. Foothold proximity reward:
-            #    The reward manager stores per-term values; we extract the
-            #    foothold_proximity term's contribution.
-            foothold_r = self._get_foothold_reward_per_env()
+            # ---- Compute ankle-corrected foothold score ----
+            foothold_score = self._get_ankle_corrected_foothold_score()
 
-            # 2. Tracking error: L2 norm of (cmd_vel - actual_vel) in body frame.
-            tracking_err = self._get_tracking_error_per_env()
-
-            # 3. Foot slip: mean sliding velocity of feet in contact.
-            slip = self._get_foot_slip_per_env()
-
-            # 4. Terrain IDs for per-terrain breakdown.
+            # ---- Terrain IDs for per-terrain breakdown ----
             terrain_ids = self._get_terrain_ids()
 
             # ---- Feed the accumulator ----
-            accum.update(
-                foothold_reward=foothold_r,
-                tracking_error=tracking_err,
-                foot_slip=slip,
-                done_mask=dones,
-                terrain_ids=terrain_ids,
-            )
+            accum.update(foothold_score=foothold_score, terrain_ids=terrain_ids)
 
         # ---- Compute the final score ----
         return accum.compute_score()
 
     # ==================================================================
-    # Per-step metric extractors
+    # Ankle-corrected foothold score
     # ==================================================================
 
-    def _get_foothold_reward_per_env(self) -> np.ndarray:
-        """Return the per-environment foothold_proximity reward for the
-        current step, as a numpy array of shape ``(num_envs,)``.
+    def _get_ankle_corrected_foothold_score(self) -> np.ndarray:
+        """Compute per-environment foothold proximity with ankle offset.
 
-        We access the reward manager's internal ``_term_rewards`` dict,
-        which maps term name → ``Tensor(num_envs,)`` of this step's values.
-        """
-        unwrapped = self._env.unwrapped
-        reward_mgr = unwrapped.reward_manager
+        The DCM planner outputs a target for the FOOT CENTRE, but the G1
+        robot's ankle sits approximately 3.5 cm behind the foot centre
+        (in the robot's forward direction).  We correct the planned target
+        by subtracting this offset before computing the L2 distance.
 
-        # ``_term_rewards`` is populated by ``RewardManager.compute()`` each step.
-        term_rewards = getattr(reward_mgr, "_term_rewards", None)
-        if term_rewards is not None and "foothold_proximity" in term_rewards:
-            raw = term_rewards["foothold_proximity"]
-            if isinstance(raw, torch.Tensor):
-                return raw.cpu().numpy()
-        # Fallback: return zeros (should not normally happen).
-        return np.zeros(unwrapped.num_envs, dtype=np.float32)
-
-    def _get_tracking_error_per_env(self) -> np.ndarray:
-        """Compute L2 velocity tracking error (body-frame x-y plane).
-
-        command  = commanded lin_vel in body frame   (from command manager)
-        actual   = root_lin_vel_b in body frame       (from asset data)
-        error    = ‖cmd_xy − actual_xy‖₂
+        Returns:
+            (num_envs,) float array in [0, 1].  1.0 = perfect placement.
         """
         unwrapped = self._env.unwrapped
         asset = unwrapped.scene["robot"]
+        num_envs = unwrapped.num_envs
+        sigma_p = self._cfg.sigma_p
 
-        # Commanded velocity: shape (num_envs, 3) in body frame.
-        cmd_vel = unwrapped.command_manager.get_command("base_velocity")
-        if isinstance(cmd_vel, torch.Tensor):
-            cmd_xy = cmd_vel[:, :2]  # only horizontal components
-        else:
-            return np.zeros(unwrapped.num_envs, dtype=np.float32)
+        # ---- 1. Find the FootholdProximityReward instance ----
+        from scripts.optuna_tune_planner.injector import PlannerInjector as _PI
+        term_instance = _PI._find_term_instance(unwrapped.reward_manager)
+        if term_instance is None:
+            return np.zeros(num_envs, dtype=np.float32)
 
-        # Actual velocity: shape (num_envs, 3) in body frame.
-        actual_vel = asset.data.root_lin_vel_b[:, :2]
+        # ---- 2. Get planned targets + swing flags from the reward term ----
+        p_star_cache = getattr(term_instance, "_p_star_cache", None)
+        swing_planned = getattr(term_instance, "_swing_planned", None)
+        if p_star_cache is None or swing_planned is None:
+            return np.zeros(num_envs, dtype=np.float32)
 
-        error = torch.norm(cmd_xy - actual_vel, dim=1)
-        return error.cpu().numpy()
-
-    def _get_foot_slip_per_env(self) -> np.ndarray:
-        """Estimate foot slip as the horizontal speed of foot links when
-        they are in contact with the ground.
-
-        For each foot (left / right ankle_roll_link), if the contact force
-        exceeds a threshold, the slip speed is the L2 norm of the foot's
-        linear velocity in the world x-y plane.  The per-environment value
-        is the mean slip across both feet.
-        """
-        unwrapped = self._env.unwrapped
-        asset = unwrapped.scene["robot"]
-        contact_sensor = unwrapped.scene.sensors["contact_forces"]
-
-        # Foot body indices — resolve from the asset's body_names.
+        # ---- 3. Get foot (ankle) positions ----
+        # The asset body names include both ankle links.  Resolve indices.
         foot_names = ["left_ankle_roll_link", "right_ankle_roll_link"]
-        foot_indices: List[int] = []
-        for name in foot_names:
-            if name in asset.data.body_names:
-                foot_indices.append(asset.data.body_names.index(name))
+        foot_indices = [
+            asset.data.body_names.index(n) for n in foot_names
+            if n in asset.data.body_names
+        ]
+        if len(foot_indices) < 2:
+            return np.zeros(num_envs, dtype=np.float32)
+        # Shape: (num_envs, 2, 3) — [left, right]
+        ankle_pos = asset.data.body_pos_w[:, foot_indices, :]
 
-        if len(foot_indices) == 0:
-            return np.zeros(unwrapped.num_envs, dtype=np.float32)
+        # ---- 4. Robot forward direction (x-axis of body frame in world) ----
+        root_quat = asset.data.root_quat_w  # (N, 4) w,x,y,z
+        # Forward vector = quaternion's x-axis
+        # q * (1,0,0) = (1-2y²-2z², 2xy+2wz, 2xz-2wy) for unit quat
+        w, x, y, z = root_quat[:, 0], root_quat[:, 1], root_quat[:, 2], root_quat[:, 3]
+        forward_x = 1.0 - 2.0 * (y * y + z * z)
+        forward_y = 2.0 * (x * y + w * z)
+        forward_xy = torch.stack([forward_x, forward_y], dim=1)  # (N, 2)
+        forward_xy = forward_xy / (torch.norm(forward_xy, dim=1, keepdim=True) + 1e-8)
 
-        # Contact force magnitude: use the most recent history frame.
-        net_forces = contact_sensor.data.net_forces_w_history  # (N, hist, n_bodies)
-        contact_force = torch.norm(net_forces[:, -1, :], dim=-1)  # (N, n_bodies)
-        contact_threshold = 1.0  # N
+        # ---- 5. Ankle offset correction ----
+        ankle_offset = self._cfg.ankle_offset  # 0.035 m
+        # Offset vector in world x-y: backward = -forward * offset
+        offset_xy = -ankle_offset * forward_xy  # (N, 2)
 
-        slip = torch.zeros(unwrapped.num_envs, device=self._device)
-        valid_count = 0
-        for idx in foot_indices:
-            in_contact = contact_force[:, idx] > contact_threshold
-            if in_contact.any():
-                # Foot velocity in world frame, take x-y components.
-                foot_vel = asset.data.body_lin_vel_w[:, idx, :2]  # (N, 2)
-                foot_slip_speed = torch.norm(foot_vel, dim=1)     # (N,)
-                slip = slip + foot_slip_speed * in_contact.float()
-                valid_count += 1
+        # ---- 6. Compute corrected distance per foot ----
+        score = torch.zeros(num_envs, device=self._device)
+        for foot_idx in range(2):
+            # Only evaluate environments where a plan is active for this foot
+            mask = swing_planned[:, foot_idx]
+            if mask.any():
+                p_target = p_star_cache[mask, foot_idx]       # (M, 3) world frame
+                p_foot = ankle_pos[mask, foot_idx]             # (M, 3) world frame
 
-        if valid_count > 0:
-            slip = slip / valid_count
-        return slip.cpu().numpy()
+                # Apply ankle offset to planned target (x-y only)
+                p_corrected = p_target.clone()
+                p_corrected[:, :2] = p_target[:, :2] + offset_xy[mask]
+
+                dist = torch.norm(p_foot - p_corrected, dim=1)  # (M,)
+                score[mask] += torch.exp(-sigma_p * dist * dist)
+
+        # Average over two feet (each foot contributes up to 1.0 at touchdown)
+        return score.cpu().numpy() / 2.0
 
     def _get_terrain_ids(self) -> Optional[np.ndarray]:
         """Return the terrain-type index for each environment.
