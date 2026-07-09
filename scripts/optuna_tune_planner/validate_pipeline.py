@@ -191,7 +191,7 @@ def check_metrics_logic() -> bool:
     cfg = EvalConfig()
     accum = MetricsAccumulator(cfg)
 
-    # --- Test 1: empty accumulator returns a finite score ---
+    # --- Test 1: empty accumulator returns valid score ---
     score = accum.compute_score()
     if 0.0 <= score <= 1.0:
         _print_result("0.3", "empty score ∈ [0,1]", True, f"score={score:.4f}")
@@ -199,47 +199,34 @@ def check_metrics_logic() -> bool:
         _print_result("0.3", "empty score ∈ [0,1]", False, f"score={score:.4f}")
         ok = False
 
-    # --- Test 2: synthetic perfect data returns high score ---
+    # --- Test 2: high foothold score → high composite ---
     n_envs = 64
     for _ in range(100):
-        accum.update(
-            foothold_reward=[0.9] * n_envs,       # high reward
-            tracking_error=[0.05] * n_envs,        # low error
-            foot_slip=[0.01] * n_envs,             # low slip
-            done_mask=[False] * n_envs,            # no terminations
-        )
+        accum.update(foothold_score=[0.9] * n_envs)
     perfect_score = accum.compute_score()
     if perfect_score > 0.5:
-        _print_result("0.3", "perfect data score > 0.5", True, f"score={perfect_score:.4f}")
+        _print_result("0.3", "high score > 0.5", True, f"score={perfect_score:.4f}")
     else:
-        _print_result("0.3", "perfect data score > 0.5", False, f"score={perfect_score:.4f}")
+        _print_result("0.3", "high score > 0.5", False, f"score={perfect_score:.4f}")
         ok = False
 
-    # --- Test 3: synthetic bad data returns low score ---
+    # --- Test 3: low foothold score → low composite ---
     accum2 = MetricsAccumulator(cfg)
     for _ in range(100):
-        accum2.update(
-            foothold_reward=[0.1] * n_envs,       # low reward
-            tracking_error=[1.5] * n_envs,         # high error
-            foot_slip=[0.1] * n_envs,              # high slip
-            done_mask=[True] * (n_envs // 2) + [False] * (n_envs // 2),  # 50% deaths
-        )
+        accum2.update(foothold_score=[0.1] * n_envs)
     bad_score = accum2.compute_score()
     if bad_score < perfect_score:
-        _print_result("0.3", "bad < perfect score", True,
-                      f"bad={bad_score:.4f} < perfect={perfect_score:.4f}")
+        _print_result("0.3", "low < high score", True,
+                      f"low={bad_score:.4f} < high={perfect_score:.4f}")
     else:
-        _print_result("0.3", "bad < perfect score", False,
-                      f"bad={bad_score:.4f} ≥ perfect={perfect_score:.4f}")
+        _print_result("0.3", "low < high score", False,
+                      f"low={bad_score:.4f} ≥ high={perfect_score:.4f}")
         ok = False
 
     # --- Test 4: summary() returns expected keys ---
     summ = accum.summary()
-    expected_summary_keys = {
-        "foothold_reward_mean", "success_rate",
-        "tracking_error_mean", "composite_score",
-    }
-    has_keys = expected_summary_keys.issubset(set(summ.keys()))
+    expected_keys = {"foothold_mean", "composite_score"}
+    has_keys = expected_keys.issubset(set(summ.keys()))
     _print_result("0.3", "summary() has expected keys", has_keys,
                   f"keys={list(summ.keys())}")
     if not has_keys:
