@@ -204,7 +204,7 @@ class _Objective:
             f"α_M={params['alpha_M']:.2f}  "
             f"α_c={params['alpha_climb']:.2f}  "
             f"β={params['beta']:.2f}  "
-            f"lp={params['lp']:.3f}  "
+            f"T={params['T']:.3f}  "
             f"t={elapsed:.1f}s{marker}"
         )
 
