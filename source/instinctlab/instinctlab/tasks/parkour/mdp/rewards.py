@@ -10,7 +10,7 @@ import torch
 from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply, quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -202,6 +202,9 @@ class FootholdProximityReward(ManagerTermBase):
         self._asset_cfg = cfg.params["asset_cfg"]
         self._sensor_cfg = cfg.params["sensor_cfg"]
         self._heightmap_sensor_cfg = cfg.params["heightmap_sensor_cfg"]
+
+        # 踝关节到脚掌中心的偏移量（沿脚部前向 +x），可配置参数
+        self._ankle_offset = cfg.params.get("ankle_offset", 0.035)
 
         # Planner
         self._planner = DCMFootholdPlanner(
@@ -403,6 +406,7 @@ class FootholdProximityReward(ManagerTermBase):
         debug_vis: bool = False,
         asset_cfg=None,
         sensor_cfg=None,
+        ankle_offset=None,
         heightmap_sensor_cfg=None,
         terrain_names=None,
     ) -> torch.Tensor:
@@ -413,7 +417,15 @@ class FootholdProximityReward(ManagerTermBase):
         asset = env.scene[self._asset_cfg.name]
 
         # ---- 1. Foot positions & contact (raw) --------------------------
-        body_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3)
+        body_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]     # (N, 2, 3) — ankle
+        body_quat = asset.data.body_quat_w[:, self._asset_cfg.body_ids]   # (N, 2, 4) — foot orientation
+        # 将踝关节位置偏移到脚掌中心（沿脚部局部 +x 方向）
+        ankle_offset_v = torch.tensor([self._ankle_offset, 0.0, 0.0], device=env.device)
+        offset_w = quat_apply(
+            body_quat.reshape(-1, 4),
+            ankle_offset_v.unsqueeze(0).expand(body_quat.shape[0] * body_quat.shape[1], -1),
+        ).reshape(-1, 2, 3)
+        foot_center = body_pos + offset_w                                    # (N, 2, 3) — foot center
 
         contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
         net_force = contact_sensor.data.net_forces_w_history          # (N, hist, n_bodies_all)
@@ -456,8 +468,8 @@ class FootholdProximityReward(ManagerTermBase):
         # ---- 3a. Lazy-init p_star_cache with actual foot positions -------
         newly_uninitialized = ~self._p_star_initialized
         if newly_uninitialized.any():
-            self._p_star_cache[newly_uninitialized, 0] = body_pos[newly_uninitialized, 0]
-            self._p_star_cache[newly_uninitialized, 1] = body_pos[newly_uninitialized, 1]
+            self._p_star_cache[newly_uninitialized, 0] = foot_center[newly_uninitialized, 0]
+            self._p_star_cache[newly_uninitialized, 1] = foot_center[newly_uninitialized, 1]
             self._p_star_initialized[newly_uninitialized] = True
 
         # ---- 动态 k：从高度图前方 fwd_dist 与中心的高度差除以 T ----
@@ -533,7 +545,7 @@ class FootholdProximityReward(ManagerTermBase):
         for foot_idx in range(2):
             mask = touchdown[:, foot_idx] & self._swing_planned[:, foot_idx]
             if mask.any():
-                dist = body_pos[mask, foot_idx] - self._p_star_cache[mask, foot_idx]  # (M, 3)
+                dist = foot_center[mask, foot_idx] - self._p_star_cache[mask, foot_idx]  # (M, 3)
                 dist_sq = (dist ** 2).sum(dim=-1)                                      # (M,)
                 foot_reward = torch.exp(-sigma_p * dist_sq)                            # (M,)
                 reward[mask] += foot_reward
@@ -556,7 +568,7 @@ class FootholdProximityReward(ManagerTermBase):
         self._was_in_contact = in_contact_smooth
 
         # ---- 4e. Cache frame data for _debug_vis_callback -----------------
-        self._last_body_pos = body_pos.clone()
+        self._last_body_pos = foot_center.clone()
         self._last_contact = in_contact_smooth.clone()
         self._last_touchdown = touchdown.clone()
         self._last_swing_onset = swing_onset.clone()

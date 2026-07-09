@@ -721,6 +721,7 @@ class G1Rewards:
             "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "ankle_offset": 0.035,
             "debug_vis": False,
             "terrain_names": ["pyramid_stairs", "pyramid_stairs_inv", "up_down", "down_up"],
         },
