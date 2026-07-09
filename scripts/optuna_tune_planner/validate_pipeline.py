@@ -117,7 +117,7 @@ def check_config() -> bool:
     # --- Check search space ---
     expected_params = {
         "alpha_pos", "alpha_dcm", "alpha_E", "alpha_Q",
-        "alpha_M", "alpha_climb", "beta", "lp",
+        "alpha_M", "alpha_climb", "beta", "T",
     }
     actual_params = set(SEARCH_SPACE.keys())
     if actual_params == expected_params:
@@ -163,15 +163,15 @@ def check_config() -> bool:
         _print_result("0.2", f"terrain weights sum={w_sum:.2f}", False)
         ok = False
 
-    # --- Check composite weights are non-negative ---
-    weights = [
-        cfg.w_foothold_proximity,
-        cfg.w_success_rate,
-        cfg.w_tracking_penalty,
-        cfg.w_foot_slip_penalty,
-    ]
-    all_pos = all(w >= 0 for w in weights)
-    _print_result("0.2", f"composite weights ≥ 0: {weights}", all_pos)
+    # --- Check sigma_p is positive ---
+    ok_sigma = cfg.sigma_p > 0
+    _print_result("0.2", f"sigma_p > 0: {cfg.sigma_p}", ok_sigma)
+    if not ok_sigma:
+        ok = False
+
+    # --- Check ankle_offset is non-negative ---
+    ok_offset = cfg.ankle_offset >= 0
+    _print_result("0.2", f"ankle_offset ≥ 0: {cfg.ankle_offset}", ok_offset)
     if not all_pos:
         ok = False
 
