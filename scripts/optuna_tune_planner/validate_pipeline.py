@@ -171,8 +171,8 @@ def check_config() -> bool:
 
     # --- Check ankle_offset is non-negative ---
     ok_offset = cfg.ankle_offset >= 0
-    _print_result("0.2", f"ankle_offset ≥ 0: {cfg.ankle_offset}", ok_offset)
-    if not all_pos:
+    _print_result("0.2", f"ankle_offset >= 0: {cfg.ankle_offset}", ok_offset)
+    if not ok_offset:
         ok = False
 
     return ok
