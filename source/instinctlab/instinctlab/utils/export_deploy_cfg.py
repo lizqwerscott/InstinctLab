@@ -140,6 +140,9 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
             term_cfg.clip = list(term_cfg.clip)
         if term_cfg.history_length == 0:
             term_cfg.history_length = 1
+        # noise may hold an instantiated noise-model object (set by ObservationManager)
+        # that to_dict() cannot serialize; it is dropped from the dict below anyway
+        term_cfg.noise = None
 
         # clean cfg
         term_cfg = term_cfg.to_dict()

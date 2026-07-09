@@ -19,6 +19,7 @@ from isaaclab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg
 
 import instinctlab.envs.mdp as instinct_mdp
 import instinctlab.tasks.parkour.mdp as mdp
@@ -73,7 +74,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             fractal_lacunarity=2.0,
             fractal_gain=0.25,
             centering=True,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.3, 0.3, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             flat_patch_sampling={
@@ -90,7 +91,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             fractal_lacunarity=2.0,
             fractal_gain=0.25,
             centering=True,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.3, 0.3, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             flat_patch_sampling={
@@ -105,7 +106,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             step_width=0.3,
             platform_width=2.5,
             border_width=1.0,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.3, 0.3, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -132,7 +133,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             step_width=0.3,
             platform_width=2.5,
             border_width=1.0,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.3, 0.3, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -160,7 +161,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             per_step_length=(0.25, 0.3),
             num_steps=(4, 8),
             platform_length=2.5,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.3, 0.3, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             side_wall_prob=[0.8, 0.8],
@@ -191,7 +192,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             per_step_length=(0.25, 0.3),
             num_steps=(4, 8),
             platform_length=2.5,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.3, 0.3, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -382,41 +383,37 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # observation terms (order preserved)
+        # Single-frame observations: temporal context is handled by the policy GRU
+        # (EncoderMoEActorCriticRecurrent), not by frame stacking.
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
-            noise=Unoise(n_min=-0.2, n_max=0.2),
-            history_length=8,
-            flatten_history_dim=True,
+            # white noise + per-episode constant IMU bias (resampled on reset);
+            # bias uses operation="abs" so it does not accumulate across resets
+            noise=NoiseModelWithAdditiveBiasCfg(
+                noise_cfg=Unoise(n_min=-0.2, n_max=0.2),
+                bias_noise_cfg=Unoise(n_min=-0.04, n_max=0.04, operation="abs"),
+            ),
             scale=0.25,
         )
         projected_gravity = ObsTerm(
             func=mdp.projected_gravity,
             noise=Unoise(n_min=-0.05, n_max=0.05),
-            history_length=8,
-            flatten_history_dim=True,
         )
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
-            history_length=8,
-            flatten_history_dim=True,
             params={"command_name": "base_velocity"},
             noise=None,
         )
-        joint_pos_rel = ObsTerm(
-            func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01), history_length=8, flatten_history_dim=True
-        )
+        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
             noise=Unoise(n_min=-0.5, n_max=0.5),
             scale=0.05,
-            history_length=8,
-            flatten_history_dim=True,
         )
-        last_action = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
+        last_action = ObsTerm(func=mdp.last_action)
         height_scan = ObsTerm(
             func=mdp.height_scan_feat,
             params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
-            history_length=4,
             noise=None,
         )
 
@@ -429,28 +426,24 @@ class ObservationsCfg:
         """Observations for critic group."""
 
         # observation terms (order preserved)
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=8, flatten_history_dim=True)
+        # Single-frame observations: temporal context is handled by the critic GRU.
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
-            history_length=8,
-            flatten_history_dim=True,
             scale=0.25,
         )
-        projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=8, flatten_history_dim=True)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity)
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
-            history_length=8,
-            flatten_history_dim=True,
             params={"command_name": "base_velocity"},
             noise=None,
         )
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=8, flatten_history_dim=True)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, history_length=8, flatten_history_dim=True)
-        actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
+        actions = ObsTerm(func=mdp.last_action)
         height_scan = ObsTerm(
             func=mdp.height_scan_feat,
             params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
-            history_length=4,
             noise=None,
         )
 
@@ -552,6 +545,32 @@ class ObservationsCfg:
             },
         )
 
+    @configclass
+    class AmpStyleObsCfg(ObsGroup):
+        """Per-env AMP style index for the multi-discriminator algorithm (WasabiPPO ``num_styles``).
+
+        Values must stay in ``[0, num_styles)`` of the algorithm config. Sub-terrains not listed
+        fall back to ``default_style``.
+        """
+
+        concatenate_terms = False
+        style = ObsTerm(
+            func=instinct_mdp.amp_terrain_style,
+            params={
+                "subterrain_to_style": {
+                    # style 0: flat ground (stand / walk / turn reference segments)
+                    "perlin_rough": 0,
+                    "perlin_rough_stand": 0,
+                    # style 1: stairs (up / down reference segments)
+                    "pyramid_stairs": 1,
+                    "pyramid_stairs_inv": 1,
+                    "up_down": 1,
+                    "down_up": 1,
+                },
+                "default_style": 0,
+            },
+        )
+
     # observation group
     policy: PolicyCfg = PolicyCfg()
     # critic group
@@ -559,6 +578,7 @@ class ObservationsCfg:
     # AMP training groups
     amp_policy: AmpPolicyStateObsCfg = AmpPolicyStateObsCfg()
     amp_reference: AmpReferenceStateObsCfg = AmpReferenceStateObsCfg()
+    amp_style: AmpStyleObsCfg = AmpStyleObsCfg()
 
 
 @configclass
@@ -787,6 +807,15 @@ class TerminationsCfg:
 class EventCfg:
     """Configuration for events."""
 
+    # Hand the scene (terrain layout) to MotionReferenceManager so motion buffers can
+    # match against it. Harmless for plain AmassMotion (base match_scene is a no-op);
+    # required by TerrainAwareAmassMotion to cache each env's subterrain.
+    match_motion_reference = EventTerm(
+        func=instinct_mdp.match_motion_ref_with_scene,
+        mode="startup",
+        params={"motion_ref_cfg": SceneEntityCfg("motion_reference")},
+    )
+
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
@@ -807,6 +836,41 @@ class EventCfg:
                 "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
                 "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
             },
+    )
+
+    body_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "mass_distribution_params": (0.8, 1.2),
+            "operation": "scale",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.9, 1.1),
+            "damping_distribution_params": (0.9, 1.1),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "armature_distribution_params": (0.5, 1.5),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
     )
 
     # reset

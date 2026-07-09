@@ -243,6 +243,8 @@ class VolumePoints(SensorBase):
         # call parent
         super()._invalidate_initialize_callback(event)
         # set all existing views to None to invalidate them
-        delattr(self, "points_visualizer")
+        # visualizer is only created when debug visualization is enabled
+        if hasattr(self, "points_visualizer"):
+            delattr(self, "points_visualizer")
         self._physics_sim_view = None
         self._body_physx_view = None

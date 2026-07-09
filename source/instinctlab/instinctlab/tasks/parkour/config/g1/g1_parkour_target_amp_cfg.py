@@ -14,7 +14,9 @@ from instinctlab.assets.unitree_g1 import (
     beyondmimic_g1_29dof_delayed_actuators,
 )
 from instinctlab.motion_reference import MotionReferenceManagerCfg
-from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMotionCfg as AmassMotionCfgBase
+from instinctlab.motion_reference.motion_files.terrain_aware_amass_motion import (
+    TerrainAwareAmassMotionCfg as AmassMotionCfgBase,
+)
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
 from instinctlab.sensors import get_link_prim_targets
 from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ParkourEnvCfg
@@ -33,13 +35,25 @@ G1_with_shoe_CFG.spawn.asset_path = os.path.abspath(
 class AmassMotionCfg(AmassMotionCfgBase):
     path = os.path.expanduser("~/Datasets")
     retargetting_func = None
-    filtered_motion_selection_filepath = os.path.expanduser("~/Datasets/parkour_motion_without_run.yaml")
+    filtered_motion_selection_filepath = os.path.expanduser("~/Datasets/parkour_motion_without_run_env.yaml")
     motion_start_from_middle_range = [0.0, 0.9]
     motion_start_height_offset = 0.0
     ensure_link_below_zero_ground = False
     buffer_device = "output_device"
     motion_interpolate_func = motion_interpolate_bilinear
     velocity_estimation_method = "frontward"
+    # Per-subterrain absolute-second start-time ranges. Keys must match
+    # ROUGH_TERRAINS_CFG.sub_terrains keys. Envs on subterrains not listed here fall back
+    # to the ratio-based sampling above. Write narrow windows so the reference stays
+    # within the intended segment for the whole episode (~10s).
+    subterrain_time_ranges_s = {
+        "pyramid_stairs":          (24.0, 24.0),
+        "down_up":     (24.0, 24.0),
+        "pyramid_stairs_inv":      (0.0, 0.0),
+        "up_down": (0.0, 0.0),
+        "perlin_rough":            (70.0, 105.0),
+        "perlin_rough_stand":      (48.0, 62.0),
+    }
 
 
 motion_reference_cfg = MotionReferenceManagerCfg(
