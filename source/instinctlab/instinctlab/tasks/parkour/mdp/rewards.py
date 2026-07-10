@@ -459,12 +459,24 @@ class FootholdBezierReward(ManagerTermBase):
         self,
         env: "ManagerBasedRLEnv",
         sigma_p: float = 10.0,
+        sigma_d: float = None,
         debug_vis: bool = False,
         asset_cfg=None,
         sensor_cfg=None,
         ankle_offset=None,
         heightmap_sensor_cfg=None,
         terrain_names=None,
+        T_swing: float = None,
+        kappa: float = None,
+        b_min: float = None,
+        b_max: float = None,
+        c_min: float = None,
+        c_scale: float = None,
+        c_max: float = None,
+        delta_l_minus: float = None,
+        delta_l_plus: float = None,
+        delta_r_minus: float = None,
+        delta_r_plus: float = None,
     ) -> torch.Tensor:
         """Compute foothold proximity reward.
 
@@ -538,7 +550,7 @@ class FootholdBezierReward(ManagerTermBase):
         fwd_patch    = h_safe[:, row_c-1:row_c+2, col_f-1:col_f+2]       # (N, 3, 3)
         h_center = center_patch.mean(dim=(1, 2))                          # (N,)
         h_fwd    = fwd_patch.mean(dim=(1, 2))                             # (N,)
-        k = (h_fwd - h_center) / self._planner.T
+        k = (h_fwd - h_center) / self._T_swing
         if self._debug_vis:
             self._last_h_center = h_center.detach().clone()
             self._last_h_fwd = h_fwd.detach().clone()
