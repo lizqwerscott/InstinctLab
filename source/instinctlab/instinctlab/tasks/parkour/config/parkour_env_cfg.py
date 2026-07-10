@@ -101,7 +101,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0.30,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -128,7 +128,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0.30,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -154,65 +154,65 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                 ),
             },
         ),
-        "up_down": terrain_gen.PerlinStairsUpDownWithWallsTerrainCfg(
-            proportion=0.20,
-            per_step_height=[0.05, 0.23],
-            per_step_width=2.0,
-            per_step_length=(0.25, 0.3),
-            num_steps=(4, 8),
-            platform_length=2.5,
-            wall_prob=[0.3, 0.3, 0.0, 0.0],
-            wall_height=5.0,
-            wall_thickness=0.05,
-            side_wall_prob=[0.8, 0.8],
-            side_wall_height=5.0,
-            side_wall_thickness=0.05,
-            perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
-                noise_scale=0.05,
-                noise_frequency=20,
-                fractal_octaves=2,
-                fractal_lacunarity=2.0,
-                fractal_gain=0.25,
-                centering=True,
-            ),
-            flat_patch_sampling={
-                "target": FlatPatchSamplingCfg(
-                    num_patches=50,
-                    patch_radius=[0.05, 0.10, 0.15, 0.20],
-                    max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(0.0, 0.0),
-                ),
-            }
-        ),
-        "down_up": terrain_gen.PerlinStairsDownUpTerrainCfg(
-            proportion=0.20,
-            per_step_height=[0.05, 0.23],
-            per_step_width=2.0,
-            per_step_length=(0.25, 0.3),
-            num_steps=(4, 8),
-            platform_length=2.5,
-            wall_prob=[0.3, 0.3, 0.0, 0.0],
-            wall_height=5.0,
-            wall_thickness=0.05,
-            perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
-                noise_scale=0.05,
-                noise_frequency=20,
-                fractal_octaves=2,
-                fractal_lacunarity=2.0,
-                fractal_gain=0.25,
-                centering=True,
-            ),
-            flat_patch_sampling={
-                "target": FlatPatchSamplingCfg(
-                    num_patches=50,
-                    patch_radius=[0.05, 0.10, 0.15, 0.20],
-                    max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(0.0, 0.0),
-                ),
-            }
-        ),
+        # "up_down": terrain_gen.PerlinStairsUpDownWithWallsTerrainCfg(
+        #     proportion=0.20,
+        #     per_step_height=[0.05, 0.23],
+        #     per_step_width=2.0,
+        #     per_step_length=(0.25, 0.3),
+        #     num_steps=(4, 8),
+        #     platform_length=2.5,
+        #     wall_prob=[0.3, 0.3, 0.0, 0.0],
+        #     wall_height=5.0,
+        #     wall_thickness=0.05,
+        #     side_wall_prob=[0.8, 0.8],
+        #     side_wall_height=5.0,
+        #     side_wall_thickness=0.05,
+        #     perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
+        #         noise_scale=0.05,
+        #         noise_frequency=20,
+        #         fractal_octaves=2,
+        #         fractal_lacunarity=2.0,
+        #         fractal_gain=0.25,
+        #         centering=True,
+        #     ),
+        #     flat_patch_sampling={
+        #         "target": FlatPatchSamplingCfg(
+        #             num_patches=50,
+        #             patch_radius=[0.05, 0.10, 0.15, 0.20],
+        #             max_height_diff=0.05,
+        #             x_range=(3.7, 3.7),
+        #             y_range=(0.0, 0.0),
+        #         ),
+        #     }
+        # ),
+        # "down_up": terrain_gen.PerlinStairsDownUpTerrainCfg(
+        #     proportion=0.20,
+        #     per_step_height=[0.05, 0.23],
+        #     per_step_width=2.0,
+        #     per_step_length=(0.25, 0.3),
+        #     num_steps=(4, 8),
+        #     platform_length=2.5,
+        #     wall_prob=[0.3, 0.3, 0.0, 0.0],
+        #     wall_height=5.0,
+        #     wall_thickness=0.05,
+        #     perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
+        #         noise_scale=0.05,
+        #         noise_frequency=20,
+        #         fractal_octaves=2,
+        #         fractal_lacunarity=2.0,
+        #         fractal_gain=0.25,
+        #         centering=True,
+        #     ),
+        #     flat_patch_sampling={
+        #         "target": FlatPatchSamplingCfg(
+        #             num_patches=50,
+        #             patch_radius=[0.05, 0.10, 0.15, 0.20],
+        #             max_height_diff=0.05,
+        #             x_range=(3.7, 3.7),
+        #             y_range=(0.0, 0.0),
+        #         ),
+        #     }
+        # ),
     },
 )
 
@@ -249,18 +249,18 @@ class SceneCfg(InteractiveSceneCfg):
     # sensors
     left_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.039, 0.0, 20.0)),
         ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.12, size=[0.12, 0.0]),
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.02, size=[0.18, 0.06]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
         update_period=0.02,
     )
     right_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.039, 0.0, 20.0)),
         ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.12, size=[0.12, 0.0]),
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.02, size=[0.18, 0.06]),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
         update_period=0.02,
@@ -564,8 +564,8 @@ class ObservationsCfg:
                     # style 1: stairs (up / down reference segments)
                     "pyramid_stairs": 1,
                     "pyramid_stairs_inv": 1,
-                    "up_down": 1,
-                    "down_up": 1,
+                    # "up_down": 1,
+                    # "down_up": 1,
                 },
                 "default_style": 0,
             },
@@ -608,8 +608,8 @@ class CommandsCfg:
             "perlin_rough_stand": {"lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
             "pyramid_stairs": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
             "pyramid_stairs_inv": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "up_down": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "down_up": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            # "up_down": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            # "down_up": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
         },
         only_positive_lin_vel_x=True,
         lin_vel_threshold=0.0,
@@ -651,6 +651,24 @@ class G1Rewards:
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "vel_threshold": 0.15,
+        },
+    )
+    no_fly = RewTerm(
+        func=mdp.no_fly,
+        weight=-2.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "grace_time": 0.04,
+        },
+    )
+    feet_air_contact_time_variance = RewTerm(
+        func=mdp.feet_air_contact_time_variance,
+        weight=-0.7,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "command_name": "base_velocity",
+            "vel_threshold": 0.15,
+            "max_time": 0.5,
         },
     )
     feet_slide = RewTerm(
@@ -705,15 +723,30 @@ class G1Rewards:
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
         },
     )
-    feet_at_plane = RewTerm(
-        func=mdp.feet_at_plane,
-        weight=-0.1,
+    foothold_support = RewTerm(
+        func=mdp.foothold_support_penalty,
+        weight=-0.5,
         params={
-            "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "contact_sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+                preserve_order=True,
+            ),
             "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
             "right_height_scanner_cfg": SceneEntityCfg("right_height_scanner"),
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
-            "height_offset": 0.035,
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+                preserve_order=True,
+            ),
+            "sole_offset": (0.039, 0.0, -0.035),
+            "epsilon_h": 0.04,
+            "temperature": 0.01,
+            "support_target": 0.75,
+            "min_settle_time": 0.04,
+            "max_settle_time": 0.14,
+            "max_vertical_speed": 0.15,
+            "max_roll_pitch_rate": 1.0,
         },
     )
     feet_close_xy = RewTerm(

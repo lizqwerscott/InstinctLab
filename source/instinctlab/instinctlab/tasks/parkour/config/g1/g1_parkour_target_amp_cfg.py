@@ -48,9 +48,9 @@ class AmassMotionCfg(AmassMotionCfgBase):
     # within the intended segment for the whole episode (~10s).
     subterrain_time_ranges_s = {
         "pyramid_stairs":          (24.0, 24.0),
-        "down_up":     (24.0, 24.0),
+        # "down_up":     (24.0, 24.0),
         "pyramid_stairs_inv":      (0.0, 0.0),
-        "up_down": (0.0, 0.0),
+        # "up_down": (0.0, 0.0),
         "perlin_rough":            (70.0, 105.0),
         "perlin_rough_stand":      (48.0, 62.0),
     }
@@ -112,7 +112,7 @@ class ShoeConfigMixin:
         self.scene.robot = G1_with_shoe_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.leg_volume_points.points_generator.z_min = -0.063
         self.scene.leg_volume_points.points_generator.z_max = -0.023
-        self.rewards.rewards.feet_at_plane.params["height_offset"] = 0.058
+        self.rewards.rewards.foothold_support.params["sole_offset"] = (0.039, 0.0, -0.058)
 
 
 @configclass
