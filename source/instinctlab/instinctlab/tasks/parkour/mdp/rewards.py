@@ -180,13 +180,15 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
     return torch.sum(torch.square(link_projected_gravity[:, :2]), dim=1)
 
 
-class FootholdProximityReward(ManagerTermBase):
-    """Touchdown reward for tracking DCM foothold targets.
+class FootholdBezierReward(ManagerTermBase):
+    """Per-frame Bézier swing trajectory tracking reward.
 
     At swing onset a target foothold is computed using the DCM planner.
-    At touchdown the L2 distance between the actual foot position and
-    the previously planned target is computed, producing a one-shot
-    Gaussian proximity reward per swing phase.
+    A quadratic Bézier arc is constructed from lift-off → apex → target.
+    Every frame during swing, the foot position is compared to the Bézier
+    reference, producing a continuous exp(-sigma_p * ||pos_err||^2) reward.
+    Optionally also tracks foot orientation w.r.t. the Bézier tangent via
+    sigma_d (sigma_d=0 recovers the position-only form).
 
     Config params (resolved by the reward manager before __init__):
         asset_cfg (SceneEntityCfg): robot body config filtered to foot links.
@@ -194,7 +196,16 @@ class FootholdProximityReward(ManagerTermBase):
         heightmap_sensor_cfg (SceneEntityCfg): heightmap sensor in scene.
 
     Call-time params (passed via RewTerm.params):
-        sigma_p (float): Gaussian sharpness for proximity reward.
+        sigma_p (float): Gaussian sharpness for position proximity.
+        sigma_d (float): Orientation tracking weight (0 = position-only).
+        T_swing (float): Swing period (seconds).
+        kappa (float): Bézier apex bias gain.
+        b_min, b_max (float): Bias clamp bounds.
+        c_min (float): Base swing clearance (m).
+        c_scale (float): Clearance scale (m per m step height).
+        c_max (float): Maximum swing clearance (m).
+        delta_l_minus, delta_l_plus (float): Pre-apex orientation window.
+        delta_r_minus, delta_r_plus (float): Post-apex orientation window.
     """
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv"):
@@ -205,6 +216,20 @@ class FootholdProximityReward(ManagerTermBase):
 
         # 踝关节到脚掌中心的偏移量（沿脚部前向 +x），可配置参数
         self._ankle_offset = cfg.params.get("ankle_offset", 0.035)
+
+        # ---- Bézier swing trajectory params (paper Table 1) ----
+        self._T_swing = cfg.params.get("T_swing", 0.45)
+        self._kappa = cfg.params.get("kappa", 0.4)
+        self._b_min = cfg.params.get("b_min", 0.25)
+        self._b_max = cfg.params.get("b_max", 0.75)
+        self._c_min = cfg.params.get("c_min", 0.05)
+        self._c_scale = cfg.params.get("c_scale", 0.5)
+        self._c_max = cfg.params.get("c_max", 0.20)
+        self._delta_l_minus = cfg.params.get("delta_l_minus", 0.30)
+        self._delta_l_plus = cfg.params.get("delta_l_plus", 0.05)
+        self._delta_r_minus = cfg.params.get("delta_r_minus", 0.05)
+        self._delta_r_plus = cfg.params.get("delta_r_plus", 0.25)
+        self._sigma_d = cfg.params.get("sigma_d", 0.0)
 
         # Planner
         self._planner = DCMFootholdPlanner(
@@ -230,8 +255,18 @@ class FootholdProximityReward(ManagerTermBase):
         self._contact_filtered = torch.ones(env.num_envs, 2, dtype=torch.float32, device=env.device)
 
         # Flag per foot indicating p_star_cache was set by a real plan (not lazy-init).
-        # Set True at swing onset, reset False at touchdown (reward fired once).
+        # Set True at swing onset, reset False when swing phase ends.
         self._swing_planned = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+
+        # ---- Bézier swing trajectory state ----
+        # Swing elapsed timer (seconds since lift-off, per foot)
+        self._swing_elapsed = torch.zeros(env.num_envs, 2, device=env.device)
+        # Lift-off foot centre position (P0) — cached at swing onset
+        self._lift_off_pos = torch.zeros(env.num_envs, 2, 3, device=env.device)
+        # Bézier apex position (P1) — computed at swing onset
+        self._apex_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
+        # u_peak (Eq 10) — pre-computed per foot at swing onset
+        self._u_peak_cache = torch.zeros(env.num_envs, 2, device=env.device)
 
         # Resolve foot order by name (for correct left/right assignment)
         foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
@@ -287,7 +322,7 @@ class FootholdProximityReward(ManagerTermBase):
             )
 
         # ---- Debug: print status ----
-        print(f"[FootholdProximityReward] debug_vis={self._debug_vis}, "
+        print(f"[FootholdBezierReward] debug_vis={self._debug_vis}, "
               f"visualizer={'created' if self._foothold_visualizer is not None else 'None'},"
               f" num_envs={env.num_envs}, device={env.device}")
 
@@ -381,6 +416,27 @@ class FootholdProximityReward(ManagerTermBase):
             )
             self._h_line_vis = VisualizationMarkers(h_line_cfg)
             self._h_line_vis.set_visibility(True)
+
+            # --- Bezier swing curve (dotted spheres along arc) ---
+            bezier_vis_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/BezierCurve",
+                markers={
+                    "left": sim_utils.SphereCfg(
+                        radius=0.012,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.0, 0.6, 1.0),
+                        ),
+                    ),
+                    "right": sim_utils.SphereCfg(
+                        radius=0.012,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 0.6, 0.0),
+                        ),
+                    ),
+                },
+            )
+            self._bezier_vis = VisualizationMarkers(bezier_vis_cfg)
+            self._bezier_vis.set_visibility(True)
 
             # --- Event flash timer (4 columns: [L_swing, L_td, R_swing, R_td]) ---
             self._event_timer = torch.zeros(env.num_envs, 4, dtype=torch.int, device=env.device)
@@ -488,7 +544,7 @@ class FootholdProximityReward(ManagerTermBase):
             self._last_h_fwd = h_fwd.detach().clone()
             self._last_fwd_dist = fwd_dist
 
-        # ---- 3b. Cache update: plan ONLY at swing onset for each foot ----
+        # ---- 3b. Cache update: plan + Bézier setup at swing onset for each foot ----
         # Left foot swing onset  → plan left-foot target (stance = right foot, sign = +1)
         # Right foot swing onset → plan right-foot target (stance = left foot, sign = -1)
         for foot_idx in range(2):
@@ -514,6 +570,36 @@ class FootholdProximityReward(ManagerTermBase):
                     self._p_star_cache[mask, 1] = p_new
                 self._swing_planned[mask, foot_idx] = True
 
+                # ---- Bézier setup at swing onset ----
+                # Record lift-off position (P0)
+                self._lift_off_pos[mask, foot_idx] = foot_center[mask, foot_idx]
+                # Reset swing timer
+                self._swing_elapsed[mask, foot_idx] = 0.0
+
+                # Compute apex position (P1, Eq 7 + Eq 9)
+                p_l = self._lift_off_pos[mask, foot_idx]     # (M, 3) lift-off
+                p_f = self._p_star_cache[mask, foot_idx]     # (M, 3) target
+                dz = p_f[:, 2] - p_l[:, 2]                    # (M,)
+                dz_abs = dz.abs()
+                # Bias (Eq 7)
+                bias = (0.5 + self._kappa * dz / self._planner.h_max).clamp(self._b_min, self._b_max)
+                # Apex xy interpolated (Eq 7)
+                apex_xy = (1.0 - bias).unsqueeze(-1) * p_l[:, :2] + bias.unsqueeze(-1) * p_f[:, :2]
+                # Clearance (Eq 9)
+                c = (self._c_min + self._c_scale * dz_abs).clamp(max=self._c_max)
+                # Apex z (Eq 9): z_apex = 2*(max(z_l,z_f) + c) - 0.5*(z_l + z_f)
+                max_z = torch.max(p_l[:, 2], p_f[:, 2])        # (M,)
+                apex_z = 2.0 * (max_z + c) - 0.5 * (p_l[:, 2] + p_f[:, 2])
+                self._apex_cache[mask, foot_idx] = torch.stack([apex_xy[:, 0], apex_xy[:, 1], apex_z], dim=-1)
+
+                # u_peak (Eq 10) — where tangent is vertical
+                z_l = p_l[:, 2]
+                z_f = p_f[:, 2]
+                z_a = apex_z
+                denom = z_l - 2.0 * z_a + z_f
+                u_peak = torch.where(denom.abs() > 1e-8, (z_l - z_a) / denom, 0.5 * torch.ones_like(z_l))
+                self._u_peak_cache[mask, foot_idx] = u_peak
+
         # -- Cost-channel visualisation (full planning each frame, cache NOT updated) --
         if self._debug_vis and self._cost_visualizer is not None:
             p_left_swing_vis, self._channels_left = self._planner.plan_with_channels_in_world(
@@ -535,39 +621,98 @@ class FootholdProximityReward(ManagerTermBase):
             self._last_W_nom_left = self._channels_left['W_nom']   # (N, 1, 1)  swing_leg_sign=+1 → +lp
             self._last_W_nom_right = self._channels_right['W_nom']   # (N, 1, 1)  swing_leg_sign=-1 → -lp
 
-        # ---- 4. Reward: one-shot at touchdown (landing) --------------------
-        # ---- 4a. Touchdown detection (rising edge: not-in-contact -> in-contact) -
-        touchdown = in_contact_smooth & (~self._was_in_contact)  # (N, 2)
+        # ---- 4. Continuous Bézier swing tracking reward (per-frame) -------
 
-        # ---- 4b. Touchdown proximity reward (once per swing per foot) ------
+        # ---- 4a. Increment swing elapsed timer for swinging feet -----------
+        is_swinging = ~in_contact_smooth                                   # (N, 2)
+        self._swing_elapsed += env.step_dt * is_swinging.float()           # (N, 2)
+
+        # ---- 4b. Touchdown detection (for debug vis / swing_planned cleanup) -
+        touchdown = in_contact_smooth & (~self._was_in_contact)            # (N, 2)
+
+        # ---- 4c. Per-frame Bézier tracking reward --------------------------
         reward = torch.zeros(env.num_envs, device=env.device)
-        reward_per_foot = torch.zeros(env.num_envs, 2, device=env.device)  # for plotting
         for foot_idx in range(2):
-            mask = touchdown[:, foot_idx] & self._swing_planned[:, foot_idx]
+            # Only compute reward for feet that are swinging AND have a plan
+            mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
             if mask.any():
-                dist = foot_center[mask, foot_idx] - self._p_star_cache[mask, foot_idx]  # (M, 3)
-                dist_sq = (dist ** 2).sum(dim=-1)                                      # (M,)
-                foot_reward = torch.exp(-sigma_p * dist_sq)                            # (M,)
-                reward[mask] += foot_reward
-                reward_per_foot[mask, foot_idx] = foot_reward
-                # Clear flag so this reward fires only once per swing phase
-                self._swing_planned[mask, foot_idx] = False
+                # Swing progress u ∈ [0, 1]
+                u = (self._swing_elapsed[mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)  # (M,)
+                u_unsq = u.unsqueeze(-1)  # (M, 1) for broadcasting with positions
 
-        # ---- 4c. Velocity-condition gate -----------------------------------
+                P0 = self._lift_off_pos[mask, foot_idx]     # (M, 3) lift-off
+                P1 = self._apex_cache[mask, foot_idx]       # (M, 3) apex
+                P2 = self._p_star_cache[mask, foot_idx]     # (M, 3) target
+
+                # Quadratic Bézier: p(u) = (1-u)²·P0 + 2·(1-u)·u·P1 + u²·P2
+                one_minus_u = 1.0 - u_unsq                  # (M, 1)
+                p_bezier = one_minus_u**2 * P0 + 2.0 * one_minus_u * u_unsq * P1 + u_unsq**2 * P2  # (M, 3)
+
+                # Position error (exponential kernel, Eq 8 first term)
+                pos_err = foot_center[mask, foot_idx] - p_bezier           # (M, 3)
+                pos_err_sq = (pos_err ** 2).sum(dim=-1)                   # (M,)
+
+                # Orientation error (optional, Eq 8 second term)
+                if self._sigma_d > 0.0:
+                    # Tangent: p_dot(u) = 2·(1-u)·(P1-P0) + 2·u·(P2-P1)
+                    p_dot = 2.0 * one_minus_u * (P1 - P0) + 2.0 * u_unsq * (P2 - P1)  # (M, 3)
+                    p_dot_norm = torch.norm(p_dot, dim=-1, keepdim=True).clamp(min=1e-8)
+                    p_dot_unit = p_dot / p_dot_norm                       # (M, 3)
+
+                    # Phase-conditional reference tangent t_hat(u)
+                    u_peak_val = self._u_peak_cache[mask, foot_idx].unsqueeze(-1)  # (M, 1)
+                    # Pre-apex: rotate 90° in sagittal plane → forward-downward
+                    pre_mask = (u >= u_peak_val.squeeze(-1) - self._delta_l_minus) & \
+                               (u < u_peak_val.squeeze(-1) - self._delta_l_plus)  # (M,)
+                    t_hat_pre = torch.stack([
+                        p_dot_unit[:, 2], p_dot_unit[:, 1], -p_dot_unit[:, 0]
+                    ], dim=-1)
+                    t_hat_pre = t_hat_pre / (torch.norm(t_hat_pre, dim=-1, keepdim=True).clamp(min=1e-8))
+                    t_hat = torch.where(pre_mask.unsqueeze(-1), t_hat_pre, torch.zeros_like(p_dot_unit))
+                    # Post-apex: align with tangent
+                    post_mask = (u > u_peak_val.squeeze(-1) + self._delta_r_minus) & \
+                                (u <= u_peak_val.squeeze(-1) + self._delta_r_plus)  # (M,)
+                    t_hat = torch.where(post_mask.unsqueeze(-1), p_dot_unit, t_hat)
+
+                    # Foot forward axis: d_hat_f = R_f · e_x
+                    foot_quat = body_quat[mask, foot_idx]                  # (M, 4)
+                    e_x = torch.tensor([1.0, 0.0, 0.0], device=foot_quat.device, dtype=foot_quat.dtype)
+                    e_x = e_x.unsqueeze(0).expand(mask.sum(), -1)
+                    d_hat_f = quat_apply(foot_quat, e_x)                  # (M, 3)
+
+                    # Distance: ||d_hat_f - t_hat(u)||² (only where orientation constraint active)
+                    ori_active = (pre_mask | post_mask).unsqueeze(-1).float()  # (M, 1)
+                    ori_err_sq = ((d_hat_f - t_hat) ** 2).sum(dim=-1) * ori_active.squeeze(-1)  # (M,)
+                else:
+                    ori_err_sq = 0.0
+
+                # Exponential proximity reward (Eq 8)
+                foot_reward = torch.exp(-sigma_p * pos_err_sq - self._sigma_d * ori_err_sq)  # (M,)
+                reward[mask] += foot_reward
+
+                # Clean up swing_planned at touchdown
+                td_mask = touchdown[:, foot_idx][mask]  # (M,) subset of mask
+                if td_mask.any():
+                    # Map td_mask back to full env_ids via mask indices
+                    mask_indices = mask.nonzero(as_tuple=True)[0]
+                    td_full_idx = mask_indices[td_mask]
+                    self._swing_planned[td_full_idx, foot_idx] = False
+
+        # ---- 4d. Velocity-condition gate -----------------------------------
         vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
         has_lin_vel = torch.norm(vel_cmd_full[:, :2], dim=1) > 0.05      # (N,)
         reward = torch.where(has_lin_vel, reward, reward * 0.0)
 
-        # ---- 4d'. Terrain-specific gating ---------------------------------
+        # ---- 4e. Terrain-specific gating ---------------------------------
         if self._terrain_names is not None:
             self._update_terrain_mask(env)
             if self._terrain_mask is not None:
                 reward = reward * self._terrain_mask
 
-        # ---- 4e. Persist filtered contact for next frame -----------------
+        # ---- 4f. Persist filtered contact for next frame -----------------
         self._was_in_contact = in_contact_smooth
 
-        # ---- 4e. Cache frame data for _debug_vis_callback -----------------
+        # ---- 4g. Cache frame data for _debug_vis_callback -----------------
         self._last_body_pos = foot_center.clone()
         self._last_contact = in_contact_smooth.clone()
         self._last_touchdown = touchdown.clone()
@@ -575,12 +720,10 @@ class FootholdProximityReward(ManagerTermBase):
 
         # ---- Event flash timer update ------------------------------------
         if self._debug_vis and hasattr(self, '_event_timer'):
-            # Reset timers on new events (flash duration in frames)
             self._event_timer[swing_onset[:, 0], 0] = 10   # left  foot swing onset
             self._event_timer[touchdown[:, 0], 1] = 15     # left  foot touchdown
             self._event_timer[swing_onset[:, 1], 2] = 10   # right foot swing onset
             self._event_timer[touchdown[:, 1], 3] = 15     # right foot touchdown
-            # Decrement active timers (clamped to zero)
             self._event_timer = (self._event_timer - 1).clamp(min=0)
 
         return reward  # (N,)
@@ -856,6 +999,52 @@ class FootholdProximityReward(ManagerTermBase):
             else:
                 self._h_line_vis.visualize(translations=None)
 
+        # ---- Bezier swing curve (dotted spheres along arc) ----
+        if hasattr(self, '_bezier_vis') and self._bezier_vis is not None:
+            vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+            K = 15
+            bezier_poses = []
+            bezier_indices = []
+
+            for foot_idx in range(2):
+                if vis_mask is not None:
+                    foot_active = vis_mask & self._swing_planned[:, foot_idx]
+                else:
+                    foot_active = self._swing_planned[:, foot_idx]
+
+                active_ids = foot_active.nonzero(as_tuple=True)[0]
+                if active_ids.numel() == 0:
+                    continue
+
+                P0 = self._lift_off_pos[active_ids, foot_idx]
+                P1 = self._apex_cache[active_ids, foot_idx]
+                P2 = self._p_star_cache[active_ids, foot_idx]
+                M = active_ids.numel()
+
+                us = torch.linspace(0.0, 1.0, K, device=P0.device)
+                u_unsq = us.view(1, -1, 1)
+                one_minus_u = 1.0 - u_unsq
+
+                points = (
+                    one_minus_u**2 * P0.unsqueeze(1)
+                    + 2.0 * one_minus_u * u_unsq * P1.unsqueeze(1)
+                    + u_unsq**2 * P2.unsqueeze(1)
+                )
+
+                points_flat = points.reshape(-1, 3)
+                idx_flat = torch.full(
+                    (points_flat.shape[0],), foot_idx,
+                    dtype=torch.int, device=points.device,
+                )
+                bezier_poses.append(points_flat)
+                bezier_indices.append(idx_flat)
+
+            if bezier_poses:
+                all_poses = torch.cat(bezier_poses, dim=0)
+                all_idx = torch.cat(bezier_indices, dim=0)
+                self._bezier_vis.visualize(translations=all_poses, marker_indices=all_idx)
+            else:
+                self._bezier_vis.visualize(translations=None)
 
     # ------------------------------------------------------------------
     def reset(self, env_ids: torch.Tensor | None = None):
@@ -873,6 +1062,10 @@ class FootholdProximityReward(ManagerTermBase):
         self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
         self._contact_filtered[env_ids] = 1.0
         self._swing_planned[env_ids] = False
+        self._swing_elapsed[env_ids] = 0.0
+        self._lift_off_pos[env_ids] = 0.0
+        self._apex_cache[env_ids] = 0.0
+        self._u_peak_cache[env_ids] = 0.0
         if hasattr(self, '_event_timer'):
             self._event_timer[env_ids] = 0
         self._terrain_mask = None

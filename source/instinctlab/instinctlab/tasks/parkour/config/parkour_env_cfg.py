@@ -713,11 +713,23 @@ class G1Rewards:
         },
     )
 
-    foothold_proximity = RewTerm(
-        func=mdp.FootholdProximityReward,
+    foothold_bezier = RewTerm(
+        func=mdp.FootholdBezierReward,
         weight=10.0,
         params={
             "sigma_p": 10.0,
+            "sigma_d": 0.0,
+            "T_swing": 0.45,
+            "kappa": 0.4,
+            "b_min": 0.25,
+            "b_max": 0.75,
+            "c_min": 0.05,
+            "c_scale": 0.5,
+            "c_max": 0.20,
+            "delta_l_minus": 0.30,
+            "delta_l_plus": 0.05,
+            "delta_r_minus": 0.05,
+            "delta_r_plus": 0.25,
             "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
