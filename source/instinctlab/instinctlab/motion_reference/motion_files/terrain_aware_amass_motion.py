@@ -80,6 +80,10 @@ class TerrainAwareAmassMotion(AmassMotion):
         self._env_start_range_s = torch.zeros(scene.num_envs, device=self.device)
         self._env_end_range_s = torch.zeros(scene.num_envs, device=self.device)
         self._env_has_subterrain_range = torch.zeros(scene.num_envs, dtype=torch.bool, device=self.device)
+        # Discrete candidate start times (padded to the longest candidate list; count 0 = not configured).
+        max_candidates = max((len(v) for v in self.cfg.subterrain_start_times_s.values()), default=1)
+        self._env_discrete_starts_s = torch.zeros(scene.num_envs, max_candidates, device=self.device)
+        self._env_discrete_count = torch.zeros(scene.num_envs, dtype=torch.long, device=self.device)
 
         terrain_importer = scene.terrain
         terrain_gen_cfg = terrain_importer.cfg.terrain_generator
@@ -95,12 +99,12 @@ class TerrainAwareAmassMotion(AmassMotion):
             )
             return
 
-        if self.cfg.subterrain_time_ranges_s:
+        if self.cfg.subterrain_time_ranges_s or self.cfg.subterrain_start_times_s:
             # The column -> sub_terrain mapping only holds for the deterministic curriculum layout;
             # with curriculum=False sub-terrains are placed randomly per tile and the mapping is invalid.
             if not terrain_gen_cfg.curriculum:
                 raise ValueError(
-                    "[TerrainAwareAmassMotion] subterrain_time_ranges_s requires "
+                    "[TerrainAwareAmassMotion] subterrain_time_ranges_s/subterrain_start_times_s require "
                     "terrain_generator.curriculum=True (deterministic column layout); got curriculum=False."
                 )
             # The ranges are absolute seconds into the assigned motion, which is only well-defined when
@@ -108,9 +112,9 @@ class TerrainAwareAmassMotion(AmassMotion):
             num_sampled_motions = int((self._motion_weights > 0).sum().item())
             if num_sampled_motions != 1:
                 raise ValueError(
-                    "[TerrainAwareAmassMotion] subterrain_time_ranges_s uses absolute-second windows, "
-                    f"which assumes a single selectable motion; got {num_sampled_motions} motions with "
-                    "nonzero sampling weight. Restrict the motion selection (e.g. via "
+                    "[TerrainAwareAmassMotion] subterrain_time_ranges_s/subterrain_start_times_s use "
+                    f"absolute-second times, which assumes a single selectable motion; got {num_sampled_motions} "
+                    "motions with nonzero sampling weight. Restrict the motion selection (e.g. via "
                     "filtered_motion_selection_filepath) to the one concatenated multi-terrain file."
                 )
 
@@ -118,19 +122,27 @@ class TerrainAwareAmassMotion(AmassMotion):
 
         # Vectorized fill via a per-col-name LUT, no python loop over envs.
         for col_idx, name in enumerate(col_to_name):
-            if name not in self.cfg.subterrain_time_ranges_s:
-                continue
-            s, e = self.cfg.subterrain_time_ranges_s[name]
-            mask = (terrain_types == col_idx).to(self.device)
-            self._env_start_range_s[mask] = float(s)
-            self._env_end_range_s[mask] = float(e)
-            self._env_has_subterrain_range[mask] = True
+            mask = None
+            if name in self.cfg.subterrain_time_ranges_s:
+                s, e = self.cfg.subterrain_time_ranges_s[name]
+                mask = (terrain_types == col_idx).to(self.device)
+                self._env_start_range_s[mask] = float(s)
+                self._env_end_range_s[mask] = float(e)
+                self._env_has_subterrain_range[mask] = True
+            if name in self.cfg.subterrain_start_times_s:
+                starts = self.cfg.subterrain_start_times_s[name]
+                mask = (terrain_types == col_idx).to(self.device) if mask is None else mask
+                self._env_discrete_starts_s[mask, : len(starts)] = torch.tensor(
+                    starts, dtype=torch.float, device=self.device
+                )
+                self._env_discrete_count[mask] = len(starts)
 
         # Sanity-summary line, useful when adding new subterrain entries.
         unique_types = torch.unique(terrain_types).tolist()
         summary = {col_to_name[int(t)]: int((terrain_types == t).sum().item()) for t in unique_types}
-        configured = {n: cnt for n, cnt in summary.items() if n in self.cfg.subterrain_time_ranges_s}
-        fallback = {n: cnt for n, cnt in summary.items() if n not in self.cfg.subterrain_time_ranges_s}
+        configured_names = set(self.cfg.subterrain_time_ranges_s) | set(self.cfg.subterrain_start_times_s)
+        configured = {n: cnt for n, cnt in summary.items() if n in configured_names}
+        fallback = {n: cnt for n, cnt in summary.items() if n not in configured_names}
         print(
             f"[TerrainAwareAmassMotion] env counts by subterrain — configured: {configured}, "
             f"fallback-to-ratio: {fallback}"
@@ -147,9 +159,10 @@ class TerrainAwareAmassMotion(AmassMotion):
     """
 
     def _sample_env_motion_start_time(self, assigned_ids: Sequence[int] | torch.Tensor) -> None:
-        """Per-env start time: terrain-aware envs sample from absolute-second range,
-        others go through the parent ratio-based sampler. Both paths are clipped to
-        the assigned motion's actual length so frame indices stay in bounds.
+        """Per-env start time: terrain-aware envs sample uniformly from their absolute-second
+        range (`subterrain_time_ranges_s`) or pick one of their discrete candidates
+        (`subterrain_start_times_s`); others go through the parent ratio-based sampler.
+        All paths are clipped to the assigned motion's actual length so frame indices stay in bounds.
         """
         if len(assigned_ids) == 0:
             return
@@ -186,6 +199,21 @@ class TerrainAwareAmassMotion(AmassMotion):
             ends = self._env_end_range_s[env_ids_with_range]
             rnd = torch.rand(len(local_idx), device=self.output_device)
             sampled = starts + rnd * (ends - starts)
+
+            target_local = assigned_ids_t[local_idx].to(self.buffer_device)
+            self._motion_buffer_start_time_s[target_local] = sampled.to(self.buffer_device)
+
+        # Step 2b: envs with discrete candidate start times pick one uniformly at random.
+        count = self._env_discrete_count[env_ids_abs]
+        has_discrete = count > 0
+        if has_discrete.any():
+            local_idx = torch.nonzero(has_discrete, as_tuple=False).flatten()
+            env_ids_discrete = env_ids_abs[local_idx]
+            n = self._env_discrete_count[env_ids_discrete]
+            # rand < 1.0 guarantees pick < n; clamp is belt-and-suspenders for fp edge cases.
+            pick = (torch.rand(len(local_idx), device=self.output_device) * n.to(torch.float)).long()
+            pick = torch.minimum(pick, n - 1)
+            sampled = self._env_discrete_starts_s[env_ids_discrete, pick]
 
             target_local = assigned_ids_t[local_idx].to(self.buffer_device)
             self._motion_buffer_start_time_s[target_local] = sampled.to(self.buffer_device)
@@ -233,13 +261,33 @@ class TerrainAwareAmassMotionCfg(AmassMotionCfg):
     class_type: type = TerrainAwareAmassMotion
 
     subterrain_time_ranges_s: dict[str, tuple[float, float]] = {}
-    """Mapping from sub_terrain name to (start_s, end_s). Inclusive on both ends."""
+    """Mapping from sub_terrain name to (start_s, end_s). Inclusive on both ends.
+
+    Continuous uniform sampling: use for homogeneous segments (flat walk, stand) where any
+    start phase is valid. Keep end_s + episode_length_s within the segment so playback never
+    crosses into unrelated content.
+    """
+
+    subterrain_start_times_s: dict[str, list[float]] = {}
+    """Mapping from sub_terrain name to a list of candidate start times (absolute seconds).
+
+    Discrete sampling: on each reset one candidate is picked uniformly at random. Use for
+    segmented skills (e.g. one complete stairs clip per episode) where playback must begin at a
+    segment head. Each candidate + episode_length_s must stay within its segment. A sub_terrain
+    may appear in either this dict or `subterrain_time_ranges_s`, never both.
+    """
 
     def __post_init__(self) -> None:
         # Parent AmassMotionCfg has no __post_init__ at the time of writing, but guard anyway.
         parent_post = getattr(super(), "__post_init__", None)
         if callable(parent_post):
             parent_post()
+        overlap = set(self.subterrain_time_ranges_s) & set(self.subterrain_start_times_s)
+        if overlap:
+            raise ValueError(
+                "Sub-terrains configured in both subterrain_time_ranges_s and subterrain_start_times_s "
+                f"(sampling rule would be ambiguous): {sorted(overlap)}"
+            )
         for name, rng in self.subterrain_time_ranges_s.items():
             if not (isinstance(rng, (tuple, list)) and len(rng) == 2):
                 raise ValueError(
@@ -252,3 +300,13 @@ class TerrainAwareAmassMotionCfg(AmassMotionCfg):
                 raise ValueError(
                     f"subterrain_time_ranges_s[{name!r}] must satisfy 0 <= start <= end, got ({s}, {e})"
                 )
+        for name, starts in self.subterrain_start_times_s.items():
+            if not (isinstance(starts, (tuple, list)) and len(starts) > 0):
+                raise ValueError(
+                    f"subterrain_start_times_s[{name!r}] must be a non-empty list of start times, got {starts!r}"
+                )
+            for s in starts:
+                if not math.isfinite(s) or s < 0:
+                    raise ValueError(
+                        f"subterrain_start_times_s[{name!r}] entries must be finite and >= 0, got {s}"
+                    )

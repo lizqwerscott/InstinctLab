@@ -39,6 +39,9 @@ class InstinctRlActorCriticRecurrentCfg(InstinctRlActorCriticCfg):
     rnn_num_layers: int = 1
     """The number of layers in the RNN."""
 
+    rnn_highway: bool = False
+    """Whether to use highway connections in the RNN."""
+
     multireward_multirnn: bool = False
     """Whether to use multiple RNN critics for multiple rewards."""
 

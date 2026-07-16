@@ -352,17 +352,17 @@ class SceneCfg(InteractiveSceneCfg):
                 output_range=(0.0, 1.0),
             ),
         },
-        data_histories={"distance_to_image_plane_noised": 37, "distance_to_image_plane_handled": 37},
+        data_histories={"distance_to_image_plane_noised": 5, "distance_to_image_plane_handled": 5},
     )
-    heightmap_scanner = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-        # attach_yaw_only=True,
-        ray_alignment='yaw',
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[1.6, 1.0]),
-        debug_vis=False,
-        mesh_prim_paths=["/World/ground"],
-    )
+    # heightmap_scanner = RayCasterCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+    #     offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+    #     # attach_yaw_only=True,
+    #     ray_alignment='yaw',
+    #     pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[1.6, 1.0]),
+    #     debug_vis=False,
+    #     mesh_prim_paths=["/World/ground"],
+    # )
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -411,9 +411,21 @@ class ObservationsCfg:
             scale=0.05,
         )
         last_action = ObsTerm(func=mdp.last_action)
-        height_scan = ObsTerm(
-            func=mdp.height_scan_feat,
-            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
+        # height_scan = ObsTerm(
+        #     func=mdp.height_scan_feat,
+        #     params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
+        #     noise=None,
+        # )
+        depth_image = ObsTerm(
+            func=mdp.delayed_visualizable_image,
+            params={
+                "data_type": "distance_to_image_plane_noised_history",
+                "sensor_cfg": SceneEntityCfg("camera"),
+                "history_skip_frames": 0,
+                "num_output_frames": 1,
+                "delayed_frame_ranges": (2, 4),
+                "debug_vis": False,
+            },
             noise=None,
         )
 
@@ -441,11 +453,24 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         actions = ObsTerm(func=mdp.last_action)
-        height_scan = ObsTerm(
-            func=mdp.height_scan_feat,
-            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
+        # height_scan = ObsTerm(
+        #     func=mdp.height_scan_feat,
+        #     params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
+        #     noise=None,
+        # )
+        depth_image = ObsTerm(
+            func=mdp.delayed_visualizable_image,
+            params={
+                "data_type": "distance_to_image_plane_handled_history",
+                "sensor_cfg": SceneEntityCfg("camera"),
+                "history_skip_frames": 0,
+                "num_output_frames": 1,
+                "delayed_frame_ranges": (1, 4),
+                "debug_vis": False,
+            },
             noise=None,
         )
+
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -606,8 +631,8 @@ class CommandsCfg:
         velocity_ranges={
             "perlin_rough": {"lin_vel_x": (0.45, 1.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
             "perlin_rough_stand": {"lin_vel_x": (0.0, 0.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
-            "pyramid_stairs": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
-            "pyramid_stairs_inv": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs": {"lin_vel_x": (0.6, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
+            "pyramid_stairs_inv": {"lin_vel_x": (0.5, 0.7), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
             # "up_down": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
             # "down_up": {"lin_vel_x": (0.45, 0.8), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (-1.0, 1.0)},
         },
@@ -663,7 +688,7 @@ class G1Rewards:
     )
     feet_air_contact_time_variance = RewTerm(
         func=mdp.feet_air_contact_time_variance,
-        weight=-0.7,
+        weight=-1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "command_name": "base_velocity",
@@ -725,7 +750,7 @@ class G1Rewards:
     )
     foothold_support = RewTerm(
         func=mdp.foothold_support_penalty,
-        weight=-0.5,
+        weight=-2.0,
         params={
             "contact_sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -740,10 +765,10 @@ class G1Rewards:
                 preserve_order=True,
             ),
             "sole_offset": (0.039, 0.0, -0.035),
-            "epsilon_h": 0.04,
+            "epsilon_h": 0.03,
             "temperature": 0.01,
             "support_target": 0.75,
-            "min_settle_time": 0.04,
+            "min_settle_time": 0.03,
             "max_settle_time": 0.14,
             "max_vertical_speed": 0.15,
             "max_roll_pitch_rate": 1.0,
@@ -1011,7 +1036,7 @@ class ParkourEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
-        self.sim.physx.gpu_collision_stack_size = 2**30
+        self.sim.physx.gpu_collision_stack_size = 2**29
         # update sensor update periods
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt

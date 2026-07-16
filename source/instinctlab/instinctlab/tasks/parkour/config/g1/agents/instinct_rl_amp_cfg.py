@@ -12,13 +12,14 @@ from instinctlab.utils.wrappers.instinct_rl import (
 @configclass
 class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
     output_size = 128
-    channels = [4]
-    kernel_sizes = [3]
-    strides = [1]
-    hidden_sizes = [256, 256]
-    paddings = [1]
-    nonlinearity = "ReLU"
-    use_maxpool = True
+    channels = [16, 32, 64]
+    kernel_sizes = [3, 3, 3]
+    strides = [1, 2, 2]
+    hidden_sizes = [256]  
+    paddings = [1, 1, 1]
+    nonlinearity = "SiLU"
+    use_maxpool = False
+    final_nonlinearity = False
     component_names = [
         "depth_image",
     ]
@@ -35,7 +36,7 @@ class HeightScanEncoderMlpCfg(InstinctRlMlpCfg):
 
 @configclass
 class EncoderConfigs:
-    height_scan_encoder = HeightScanEncoderMlpCfg()
+    depth_encoder = DepthEncoderConv2dCfg()
 
 
 @configclass
@@ -64,7 +65,7 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
     #   style 0 = flat (stand / walk / turn), style 1 = stairs (up / down).
     num_styles = 2
     discriminator_kwargs = {
-        "hidden_sizes": [1024, 512],
+        "hidden_sizes": [512, 256, 128],
         "nonlinearity": "ReLU",
         # Running input normalization (standard AMP practice): the state features have mixed
         # scales, and each style's discriminator keeps its own statistics so the two style
@@ -72,7 +73,7 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
         "normalizer_class_name": "EmpiricalNormalization",
     }
 
-    discriminator_reward_coef = 0.25
+    discriminator_reward_coef = 0.20
     discriminator_reward_type = "quad"
     discriminator_loss_func = "MSELoss"
     discriminator_gradient_penalty_coef = 5.0
