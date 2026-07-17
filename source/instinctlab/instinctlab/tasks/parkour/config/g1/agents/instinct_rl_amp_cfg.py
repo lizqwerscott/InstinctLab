@@ -38,6 +38,10 @@ class HeightScanEncoderMlpCfg(InstinctRlMlpCfg):
 class EncoderConfigs:
     depth_encoder = DepthEncoderConv2dCfg()
 
+@configclass
+class HeightScanEncoderCfg:
+    height_scanner = HeightScanEncoderMlpCfg()
+
 
 @configclass
 class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
@@ -54,7 +58,7 @@ class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
     rnn_hidden_size = 256
     rnn_num_layers = 1
     encoder_configs = EncoderConfigs()
-    critic_encoder_configs = EncoderConfigs()
+    critic_encoder_configs = HeightScanEncoderCfg()
 
 
 @configclass
@@ -103,7 +107,7 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
 
 @configclass
 class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
-    num_steps_per_env = 24
+    num_steps_per_env = 36
     max_iterations = 30000
     save_interval = 2000
     experiment_name = "g1_parkour"

@@ -354,15 +354,15 @@ class SceneCfg(InteractiveSceneCfg):
         },
         data_histories={"distance_to_image_plane_noised": 5, "distance_to_image_plane_handled": 5},
     )
-    # heightmap_scanner = RayCasterCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-    #     offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-    #     # attach_yaw_only=True,
-    #     ray_alignment='yaw',
-    #     pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[1.6, 1.0]),
-    #     debug_vis=False,
-    #     mesh_prim_paths=["/World/ground"],
-    # )
+    heightmap_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        # attach_yaw_only=True,
+        ray_alignment='yaw',
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[1.6, 1.0]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+    )
     # lights
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -453,23 +453,23 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
         actions = ObsTerm(func=mdp.last_action)
-        # height_scan = ObsTerm(
-        #     func=mdp.height_scan_feat,
-        #     params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
-        #     noise=None,
-        # )
-        depth_image = ObsTerm(
-            func=mdp.delayed_visualizable_image,
-            params={
-                "data_type": "distance_to_image_plane_handled_history",
-                "sensor_cfg": SceneEntityCfg("camera"),
-                "history_skip_frames": 0,
-                "num_output_frames": 1,
-                "delayed_frame_ranges": (1, 4),
-                "debug_vis": False,
-            },
+        height_scan = ObsTerm(
+            func=mdp.height_scan_feat,
+            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
             noise=None,
         )
+        # depth_image = ObsTerm(
+        #     func=mdp.delayed_visualizable_image,
+        #     params={
+        #         "data_type": "distance_to_image_plane_handled_history",
+        #         "sensor_cfg": SceneEntityCfg("camera"),
+        #         "history_skip_frames": 0,
+        #         "num_output_frames": 1,
+        #         "delayed_frame_ranges": (1, 4),
+        #         "debug_vis": False,
+        #     },
+        #     noise=None,
+        # )
 
 
         def __post_init__(self):
