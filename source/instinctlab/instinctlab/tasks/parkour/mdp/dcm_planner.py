@@ -71,12 +71,12 @@ class DCMFootholdPlanner:
         lp: float = 0.20,
         # Footprint kernel (in cells)
         fp_h: int = 2,
-        fp_w: int = 5,
+        fp_w: int = 3,
         # Cost weights
-        alpha_pos:   float = 1.0,
+        alpha_pos:   float = 3.0,
         alpha_dcm:   float = 0.5,
         alpha_E:     float = 0.6,
-        alpha_Q:     float = 10.0,
+        alpha_Q:     float = 4.0,
         alpha_M:     float = 6.0,
         alpha_climb: float = 1.5,
         beta:        float = 2.5,
