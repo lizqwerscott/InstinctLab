@@ -648,8 +648,15 @@ class FootholdBezierReward(ManagerTermBase):
             # Only compute reward for feet that are swinging AND have a plan
             mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
             if mask.any():
-                # Swing progress u ∈ [0, 1]
-                u = (self._swing_elapsed[mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)  # (M,)
+                # Swing progress with quintic smoothstep time-warping.
+                # Linear time ratio u_time = t / T_swing ∈ [0, 1].
+                # Warped Bézier parameter u = f(u_time) where f is the
+                # 5th-order smoothstep: f(x) = 6x⁵ − 15x⁴ + 10x³.
+                # Properties: f(0)=0, f(1)=1, f'(0)=f'(1)=0, f''(0)=f''(1)=0.
+                # This guarantees zero endpoint velocity / acceleration so the
+                # foot reference is stationary at lift-off and touch-down.
+                u_time = (self._swing_elapsed[mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)  # (M,)
+                u = u_time**3 * (10.0 - 15.0 * u_time + 6.0 * u_time**2)  # (M,) quintic smoothstep
                 u_unsq = u.unsqueeze(-1)  # (M, 1) for broadcasting with positions
 
                 P0 = self._lift_off_pos[mask, foot_idx]     # (M, 3) lift-off
