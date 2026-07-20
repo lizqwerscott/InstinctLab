@@ -15,7 +15,7 @@ class DepthEncoderConv2dCfg(InstinctRlConv2dHeadCfg):
     channels = [4]
     kernel_sizes = [3]
     strides = [1]
-    hidden_sizes = [256, 256]
+    hidden_sizes = [256, 256, 256]
     paddings = [1]
     nonlinearity = "ReLU"
     use_maxpool = True
@@ -37,6 +37,10 @@ class HeightScanEncoderMlpCfg(InstinctRlMlpCfg):
 class EncoderConfigs:
     height_scan_encoder = HeightScanEncoderMlpCfg()
 
+@configclass
+class EncoderDepthConfigs:
+    depth_image_encoder = DepthEncoderConv2dCfg()
+
 
 @configclass
 class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
@@ -45,7 +49,7 @@ class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
     activation = "elu"
-    encoder_configs = EncoderConfigs()
+    encoder_configs = EncoderDepthConfigs()
     critic_encoder_configs = EncoderConfigs()
 
 
