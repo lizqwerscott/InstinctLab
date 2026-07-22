@@ -231,6 +231,26 @@ class FootholdBezierReward(ManagerTermBase):
         self._delta_r_plus = cfg.params.get("delta_r_plus", 0.25)
         self._sigma_d = cfg.params.get("sigma_d", 0.0)
 
+        # ---- Swing completion enforcement (three-tier) ----
+        # Tier 1 (complete, no penalty):
+        #   u_time ∈ [window_early, window_late]  AND  Δx²+β·Δy² ≤ x_tol²
+        # Tier 2 (soft penalty, −1.5× cum_reward):
+        #   u_time ∈ [window_early_soft, window_late_soft]  AND
+        #   Δx²+β·Δy² ≤ x_tol_soft²   (but NOT Tier 1)
+        # Tier 3 (hard penalty, −2.0× cum_reward): everything else.
+        self._x_tol = cfg.params.get("x_tol", 0.04)
+        self._x_tol_soft = cfg.params.get("x_tol_soft", 0.08)
+        self._window_early = cfg.params.get("window_early", 0.8)
+        self._window_late = cfg.params.get("window_late", 1.2)
+        self._window_early_soft = cfg.params.get("window_early_soft", 0.6)
+        self._window_late_soft = cfg.params.get("window_late_soft", 1.4)
+        self._penalty_multiplier = cfg.params.get("penalty_multiplier", -2.0)
+        self._penalty_soft = cfg.params.get("penalty_soft", -1.5)
+
+        # Per-foot cumulative tracking reward since swing onset, used as the
+        # base for the early-termination penalty.
+        self._cum_reward = torch.zeros(env.num_envs, 2, device=env.device)
+
         # Planner
         self._planner = DCMFootholdPlanner(
             num_envs=env.num_envs, device=env.device,
@@ -642,80 +662,138 @@ class FootholdBezierReward(ManagerTermBase):
         # ---- 4b. Touchdown detection (for debug vis / swing_planned cleanup) -
         touchdown = in_contact_smooth & (~self._was_in_contact)            # (N, 2)
 
-        # ---- 4c. Per-frame Bézier tracking reward --------------------------
+        # ---- 4c. Per-frame Bézier tracking reward + completion enforcement --
+        # Design principle (three-tier completion):
+        #   Tier 1 (complete, no penalty):
+        #     u ∈ [0.8T, 1.2T]  AND  Δx²+β·Δy² ≤ 0.04²
+        #   Tier 2 (soft penalty, −1.5×):
+        #     u ∈ [0.6T, 1.4T]  AND  Δx²+β·Δy² ≤ 0.08²  (but NOT Tier 1)
+        #   Tier 3 (hard penalty, −2.0×):
+        #     everything else (early/late TD, far from P₂, overtime)
         reward = torch.zeros(env.num_envs, device=env.device)
         for foot_idx in range(2):
-            # Only compute reward for feet that are swinging AND have a plan
-            mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
-            if mask.any():
-                # Swing progress with quintic smoothstep time-warping.
-                # Linear time ratio u_time = t / T_swing ∈ [0, 1].
-                # Warped Bézier parameter u = f(u_time) where f is the
-                # 5th-order smoothstep: f(x) = 6x⁵ − 15x⁴ + 10x³.
-                # Properties: f(0)=0, f(1)=1, f'(0)=f'(1)=0, f''(0)=f''(1)=0.
-                # This guarantees zero endpoint velocity / acceleration so the
-                # foot reference is stationary at lift-off and touch-down.
-                u_time = (self._swing_elapsed[mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)  # (M,)
-                u = u_time**3 * (10.0 - 15.0 * u_time + 6.0 * u_time**2)  # (M,) quintic smoothstep
-                u_unsq = u.unsqueeze(-1)  # (M, 1) for broadcasting with positions
+            # --- 4c-i. Tracking reward for currently-swinging feet ----------
+            tracking_mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
+            if tracking_mask.any():
+                # Quintic-smoothstep time warping (zero endpoint vel/acc).
+                u_time_clamped = (self._swing_elapsed[tracking_mask, foot_idx]
+                                  / self._T_swing).clamp(0.0, 1.0)
+                u = u_time_clamped**3 * (10.0 - 15.0 * u_time_clamped
+                                         + 6.0 * u_time_clamped**2)
+                u_unsq = u.unsqueeze(-1)
 
-                P0 = self._lift_off_pos[mask, foot_idx]     # (M, 3) lift-off
-                P1 = self._apex_cache[mask, foot_idx]       # (M, 3) apex
-                P2 = self._p_star_cache[mask, foot_idx]     # (M, 3) target
+                P0 = self._lift_off_pos[tracking_mask, foot_idx]
+                P1 = self._apex_cache[tracking_mask, foot_idx]
+                P2 = self._p_star_cache[tracking_mask, foot_idx]
 
-                # Quadratic Bézier: p(u) = (1-u)²·P0 + 2·(1-u)·u·P1 + u²·P2
-                one_minus_u = 1.0 - u_unsq                  # (M, 1)
-                p_bezier = one_minus_u**2 * P0 + 2.0 * one_minus_u * u_unsq * P1 + u_unsq**2 * P2  # (M, 3)
+                one_minus_u = 1.0 - u_unsq
+                p_bezier = (one_minus_u**2 * P0
+                            + 2.0 * one_minus_u * u_unsq * P1
+                            + u_unsq**2 * P2)
 
-                # Position error (exponential kernel, Eq 8 first term)
-                pos_err = foot_center[mask, foot_idx] - p_bezier           # (M, 3)
-                pos_err_sq = (pos_err ** 2).sum(dim=-1)                   # (M,)
+                pos_err = foot_center[tracking_mask, foot_idx] - p_bezier
+                pos_err_sq = (pos_err ** 2).sum(dim=-1)
 
-                # Orientation error (optional, Eq 8 second term)
+                # Orientation error (optional)
                 if self._sigma_d > 0.0:
-                    # Tangent: p_dot(u) = 2·(1-u)·(P1-P0) + 2·u·(P2-P1)
-                    p_dot = 2.0 * one_minus_u * (P1 - P0) + 2.0 * u_unsq * (P2 - P1)  # (M, 3)
+                    p_dot = (2.0 * one_minus_u * (P1 - P0)
+                             + 2.0 * u_unsq * (P2 - P1))
                     p_dot_norm = torch.norm(p_dot, dim=-1, keepdim=True).clamp(min=1e-8)
-                    p_dot_unit = p_dot / p_dot_norm                       # (M, 3)
+                    p_dot_unit = p_dot / p_dot_norm
 
-                    # Phase-conditional reference tangent t_hat(u)
-                    u_peak_val = self._u_peak_cache[mask, foot_idx].unsqueeze(-1)  # (M, 1)
-                    # Pre-apex: rotate 90° in sagittal plane → forward-downward
-                    pre_mask = (u >= u_peak_val.squeeze(-1) - self._delta_l_minus) & \
-                               (u < u_peak_val.squeeze(-1) - self._delta_l_plus)  # (M,)
-                    t_hat_pre = torch.stack([
-                        p_dot_unit[:, 2], p_dot_unit[:, 1], -p_dot_unit[:, 0]
-                    ], dim=-1)
-                    t_hat_pre = t_hat_pre / (torch.norm(t_hat_pre, dim=-1, keepdim=True).clamp(min=1e-8))
-                    t_hat = torch.where(pre_mask.unsqueeze(-1), t_hat_pre, torch.zeros_like(p_dot_unit))
-                    # Post-apex: align with tangent
-                    post_mask = (u > u_peak_val.squeeze(-1) + self._delta_r_minus) & \
-                                (u <= u_peak_val.squeeze(-1) + self._delta_r_plus)  # (M,)
+                    u_peak_val = self._u_peak_cache[tracking_mask, foot_idx].unsqueeze(-1)
+                    pre_mask = ((u >= u_peak_val.squeeze(-1) - self._delta_l_minus)
+                                & (u < u_peak_val.squeeze(-1) - self._delta_l_plus))
+                    t_hat_pre = torch.stack(
+                        [p_dot_unit[:, 2], p_dot_unit[:, 1], -p_dot_unit[:, 0]], dim=-1)
+                    t_hat_pre = t_hat_pre / (torch.norm(t_hat_pre, dim=-1, keepdim=True)
+                                             .clamp(min=1e-8))
+                    t_hat = torch.where(pre_mask.unsqueeze(-1), t_hat_pre,
+                                        torch.zeros_like(p_dot_unit))
+                    post_mask = ((u > u_peak_val.squeeze(-1) + self._delta_r_minus)
+                                 & (u <= u_peak_val.squeeze(-1) + self._delta_r_plus))
                     t_hat = torch.where(post_mask.unsqueeze(-1), p_dot_unit, t_hat)
 
-                    # Foot forward axis: d_hat_f = R_f · e_x
-                    foot_quat = body_quat[mask, foot_idx]                  # (M, 4)
-                    e_x = torch.tensor([1.0, 0.0, 0.0], device=foot_quat.device, dtype=foot_quat.dtype)
-                    e_x = e_x.unsqueeze(0).expand(mask.sum(), -1)
-                    d_hat_f = quat_apply(foot_quat, e_x)                  # (M, 3)
-
-                    # Distance: ||d_hat_f - t_hat(u)||² (only where orientation constraint active)
-                    ori_active = (pre_mask | post_mask).unsqueeze(-1).float()  # (M, 1)
-                    ori_err_sq = ((d_hat_f - t_hat) ** 2).sum(dim=-1) * ori_active.squeeze(-1)  # (M,)
+                    foot_quat = body_quat[tracking_mask, foot_idx]
+                    e_x = torch.tensor([1.0, 0.0, 0.0], device=foot_quat.device,
+                                       dtype=foot_quat.dtype)
+                    e_x = e_x.unsqueeze(0).expand(tracking_mask.sum(), -1)
+                    d_hat_f = quat_apply(foot_quat, e_x)
+                    ori_active = (pre_mask | post_mask).unsqueeze(-1).float()
+                    ori_err_sq = ((d_hat_f - t_hat) ** 2).sum(dim=-1) * ori_active.squeeze(-1)
                 else:
                     ori_err_sq = 0.0
 
-                # Exponential proximity reward (Eq 8)
-                foot_reward = torch.exp(-sigma_p * pos_err_sq - self._sigma_d * ori_err_sq)  # (M,)
-                reward[mask] += foot_reward
+                # Progress-gated tracking reward: u × exp(−σ_p·d² − σ_d·e_ori)
+                # Multiplying by u eliminates the reward-hacking loophole:
+                # at the slow-start phase (u ≈ 0) the robot gets ~0 reward
+                # regardless of tracking quality → must actually advance the
+                # swing to earn meaningful reward.
+                tracking_quality = torch.exp(-sigma_p * pos_err_sq
+                                             - self._sigma_d * ori_err_sq)
+                foot_reward = u * tracking_quality
+                reward[tracking_mask] += foot_reward
+                self._cum_reward[tracking_mask, foot_idx] += foot_reward
 
-                # Clean up swing_planned at touchdown
-                td_mask = touchdown[:, foot_idx][mask]  # (M,) subset of mask
-                if td_mask.any():
-                    # Map td_mask back to full env_ids via mask indices
-                    mask_indices = mask.nonzero(as_tuple=True)[0]
-                    td_full_idx = mask_indices[td_mask]
-                    self._swing_planned[td_full_idx, foot_idx] = False
+            # --- 4c-ii. Overtime enforcement (t > window_late_soft × T_swing) -
+            # Uses the widest window (1.4 T) so touch-downs in [1.2, 1.4]
+            # can still enter the tier-2 soft-penalty path below.
+            overtime_mask = (self._swing_planned[:, foot_idx]
+                             & (self._swing_elapsed[:, foot_idx]
+                                > self._window_late_soft * self._T_swing))
+            if overtime_mask.any():
+                penalty = (self._penalty_multiplier
+                           * self._cum_reward[overtime_mask, foot_idx])
+                reward[overtime_mask] += penalty
+
+                self._cum_reward[overtime_mask, foot_idx] = 0.0
+                self._swing_planned[overtime_mask, foot_idx] = False
+
+            # --- 4c-iii. Touchdown settlement (three-tier) -----------------
+            td_full = touchdown[:, foot_idx] & self._swing_planned[:, foot_idx]
+            if td_full.any():
+                u_time_td = (self._swing_elapsed[td_full, foot_idx]
+                             / self._T_swing)  # (M_td,) un-clamped
+
+                dx_td = (foot_center[td_full, foot_idx, 0]
+                         - self._p_star_cache[td_full, foot_idx, 0])
+                dy_td = (foot_center[td_full, foot_idx, 1]
+                         - self._p_star_cache[td_full, foot_idx, 1])
+                dist2 = dx_td**2 + self._planner.beta * dy_td**2  # (M_td,)
+
+                # ---- Tier 1: complete (no penalty) -------------------------
+                in_win1 = ((u_time_td >= self._window_early)
+                           & (u_time_td <= self._window_late))
+                in_ell1 = dist2 <= self._x_tol**2
+                tier1 = in_win1 & in_ell1  # (M_td,)
+
+                # ---- Tier 2: soft penalty  (−1.5 × cum_reward) -------------
+                in_win2 = ((u_time_td >= self._window_early_soft)
+                           & (u_time_td <= self._window_late_soft))
+                in_ell2 = dist2 <= self._x_tol_soft**2
+                tier2 = (~tier1) & in_win2 & in_ell2  # (M_td,)
+
+                # ---- Tier 3: hard penalty  (−2.0 × cum_reward) -------------
+                tier3 = (~tier1) & (~tier2)  # everything else
+
+                # Apply penalties (allocate N-sized masks)
+                is_tier2 = torch.zeros(env.num_envs, dtype=torch.bool,
+                                       device=env.device)
+                is_tier2[td_full] = tier2
+                if is_tier2.any():
+                    reward[is_tier2] += (self._penalty_soft
+                                         * self._cum_reward[is_tier2, foot_idx])
+
+                is_tier3 = torch.zeros(env.num_envs, dtype=torch.bool,
+                                       device=env.device)
+                is_tier3[td_full] = tier3
+                if is_tier3.any():
+                    reward[is_tier3] += (self._penalty_multiplier
+                                         * self._cum_reward[is_tier3, foot_idx])
+
+                # Clear state for all touchdown envs.
+                self._cum_reward[td_full, foot_idx] = 0.0
+                self._swing_planned[td_full, foot_idx] = False
 
         # ---- 4d. Velocity-condition gate -----------------------------------
         vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
@@ -1085,6 +1163,7 @@ class FootholdBezierReward(ManagerTermBase):
         self._lift_off_pos[env_ids] = 0.0
         self._apex_cache[env_ids] = 0.0
         self._u_peak_cache[env_ids] = 0.0
+        self._cum_reward[env_ids] = 0.0
         if hasattr(self, '_event_timer'):
             self._event_timer[env_ids] = 0
         self._terrain_mask = None
