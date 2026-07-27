@@ -71,7 +71,7 @@ class DCMFootholdPlanner:
         lp: float = 0.20,
         # Footprint kernel (in cells)
         fp_h: int = 2,
-        fp_w: int = 5,
+        fp_w: int = 4,
         # Cost weights
         alpha_pos:   float = 1.0,
         alpha_dcm:   float = 0.5,
@@ -85,6 +85,8 @@ class DCMFootholdPlanner:
         h_max: float = 0.28,
         v_star: float = 0.5,
         v_min: float = 0.05,
+        # Forward range mask (only consider cells ahead of pelvis)
+        max_fwd_range: float = 0.6,
     ):
         self.num_envs = num_envs
         self.device = device
@@ -125,6 +127,9 @@ class DCMFootholdPlanner:
         self.h_max  = h_max
         self.v_star = v_star
         self.v_min  = v_min
+
+        # ---- Forward range mask ----
+        self.max_fwd_range = max_fwd_range
 
         # ---- Sobel kernels ----
         self.kx, self.ky = _make_sobel_kernels(device)
@@ -210,6 +215,9 @@ class DCMFootholdPlanner:
 
         # ---- Validity mask ----
         valid = ~torch.isnan(heightmap)
+        # Only consider cells within [0, max_fwd_range] ahead of pelvis
+        x_mask = (self.grid_x >= 0.0) & (self.grid_x <= self.max_fwd_range)
+        valid = valid & x_mask.unsqueeze(0)
 
         # Q: -inf/+inf sentinels so invalid cells never win max/min.
         h_for_max = torch.where(
