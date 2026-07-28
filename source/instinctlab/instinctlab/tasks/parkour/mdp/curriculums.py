@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from isaaclab.assets import Articulation
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import CurriculumTermCfg, ManagerTermBase, SceneEntityCfg
 from isaaclab.terrains import TerrainImporter
 
 if TYPE_CHECKING:
@@ -44,10 +44,66 @@ def tracking_exp_vel(
     command = env.command_manager.get_term("base_velocity")
     tracking_exp_vel_xy = command.metrics["tracking_exp_vel_xy"][env_ids]
     tracking_exp_vel_yaw = command.metrics["tracking_exp_vel_yaw"][env_ids]
-    move_up = (tracking_exp_vel_xy > lin_vel_threshold[1]) * (tracking_exp_vel_yaw > ang_vel_threshold[1])
+    move_up = (tracking_exp_vel_xy > lin_vel_threshold[1]) * (
+        tracking_exp_vel_yaw > ang_vel_threshold[1]
+    )
     move_down = tracking_exp_vel_xy < lin_vel_threshold[0]
     move_down *= ~move_up
     # update terrain levels
     terrain.update_env_origins(env_ids, move_up, move_down)
     # return the mean terrain level
     return torch.mean(terrain.terrain_levels.float())
+
+
+class foothold_proximity_weight_schedule(ManagerTermBase):
+    """Curriculum that gates the foothold_proximity reward weight behind
+    single-stance gait detection.
+
+    The weight stays at ``start_weight`` until the robot population has
+    accumulated enough ``cumulative_single_stance_frames`` (measured by
+    ``contact_left XOR contact_right``), which filters out two-foot hopping
+    and shuffling.  Once the threshold is crossed, the weight linearly ramps
+    up to ``end_weight`` over ``ramp_single_stance_frames`` additional frames.
+
+    A ``common_step_counter``-based fallback (``safety_step_counter``)
+    prevents the weight from remaining at zero after a training resume,
+    where the in-memory accumulator would start from scratch.
+
+    The default ``end_weight=None`` picks up whatever weight is set in the
+    config, so the curriculum stays in sync if the config changes.
+    """
+
+    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._term_cfg = env.reward_manager.get_term_cfg("foothold_proximity")
+        self._initial_weight = self._term_cfg.weight
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        env_ids: Sequence[int],
+        start_weight: float = 0.0,
+        end_weight: float | None = None,
+        min_single_stance_frames: int = 1_000_000,
+        ramp_single_stance_frames: int = 10_000_000,
+        safety_step_counter: int = 200_000_000,
+    ) -> float:
+        if end_weight is None:
+            end_weight = self._initial_weight
+
+        total = self._term_cfg.func.cumulative_single_stance_frames
+        if total < min_single_stance_frames:
+            xor_progress = 0.0
+        else:
+            xor_progress = min(
+                (total - min_single_stance_frames) / ramp_single_stance_frames, 1.0
+            )
+
+        # Fallback: common_step_counter-based schedule handles training resume
+        # where the in-memory accumulator starts from zero.
+        step_progress = min(env.common_step_counter / safety_step_counter, 1.0)
+
+        progress = max(xor_progress, step_progress)
+        new_weight = start_weight + (end_weight - start_weight) * progress
+        self._term_cfg.weight = new_weight
+        return new_weight
