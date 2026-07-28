@@ -75,13 +75,9 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-        try:
-            reward_term_name = cfg.params.get("reward_term_name", "foothold_proximity")
-            self._term_cfg = env.reward_manager.get_term_cfg(reward_term_name)
-            self._initial_weight = self._term_cfg.weight
-            self._has_term = True
-        except ValueError:
-            self._has_term = False
+        self._reward_term_name = cfg.params.get("reward_term_name", "foothold_proximity")
+        self._term_cfg = None
+        self._initial_weight = None
 
     def __call__(
         self,
@@ -94,7 +90,14 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
         ramp_single_stance_frames: int = 10_000_000,
         safety_step_counter: int = 200_000_000,
     ) -> float:
-        if not self._has_term:
+        if self._term_cfg is None:
+            try:
+                self._term_cfg = env.reward_manager.get_term_cfg(self._reward_term_name)
+                self._initial_weight = self._term_cfg.weight
+            except ValueError:
+                pass
+
+        if self._term_cfg is None:
             return start_weight
 
         if end_weight is None:
