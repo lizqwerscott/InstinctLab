@@ -1014,6 +1014,7 @@ class CurriculumCfg:
     foothold_proximity_weight = CurrTerm(
         func=mdp.foothold_proximity_weight_schedule,
         params={
+            "reward_term_name": "foothold_proximity",
             "start_weight": 0.0,
             "end_weight": 10.0,
             "min_single_stance_frames": 1_000_000,
