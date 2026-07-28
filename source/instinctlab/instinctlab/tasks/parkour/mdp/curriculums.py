@@ -87,6 +87,7 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
         self,
         env: ManagerBasedRLEnv,
         env_ids: Sequence[int],
+        reward_term_name: str = "foothold_proximity",
         start_weight: float = 0.0,
         end_weight: float | None = None,
         min_single_stance_frames: int = 1_000_000,
