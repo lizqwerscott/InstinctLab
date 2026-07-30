@@ -294,11 +294,6 @@ class FootholdProximityReward(ManagerTermBase):
             env.num_envs, 2, dtype=torch.bool, device=env.device
         )
 
-        # Lifetime counter of total single-stance frames across all envs.
-        # Used by the curriculum to detect when the robot has learned to walk
-        # with alternating single-leg gait before ramping up the reward weight.
-        self.cumulative_single_stance_frames = 0
-
         # Resolve foot order by name (for correct left/right assignment)
         foot_names: list[str] = env.scene[self._asset_cfg.name].data.body_names
         self._foot_order: list[str] = [foot_names[i] for i in self._asset_cfg.body_ids]
@@ -527,10 +522,6 @@ class FootholdProximityReward(ManagerTermBase):
             + (1.0 - contact_alpha) * in_contact.float()
         )
         in_contact_smooth = self._contact_filtered > 0.3  # (N, 2)
-
-        # Single-stance (XOR) accumulator for gait-detection curriculum.
-        single_stance = in_contact_smooth[:, 0] != in_contact_smooth[:, 1]
-        self.cumulative_single_stance_frames += single_stance.sum().item()
 
         # ---- 2b. Swing-onset detection (rising edge on filtered signal) ---
         swing_onset = (~in_contact_smooth) & self._was_in_contact  # (N, 2)

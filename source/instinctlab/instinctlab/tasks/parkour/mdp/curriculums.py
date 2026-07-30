@@ -57,41 +57,26 @@ def tracking_exp_vel(
 
 class foothold_proximity_weight_schedule(ManagerTermBase):
     """Curriculum that gates the foothold_proximity reward weight behind
-    single-stance gait detection.
+    velocity tracking performance.
 
-    The weight stays at ``start_weight`` until the robot population has
-    accumulated enough ``cumulative_single_stance_frames`` (measured by
-    ``contact_left XOR contact_right``), which filters out two-foot hopping
-    and shuffling.  Once the threshold is crossed, the weight linearly ramps
-    up to ``end_weight`` over ``ramp_single_stance_frames`` additional frames.
+    The weight linearly ramps from ``start_weight`` to ``end_weight``
+    based on the population's average instantaneous velocity tracking
+    score, smoothed by an EMA that persists across episode boundaries.
+    When tracking is poor the weight stays low, giving the robot time
+    to learn a basic gait before being pressured for precise foothold
+    placement.
 
-    Thresholds are expressed per-environment so they work regardless of
-    the number of parallel environments:
-
-    - ``min_single_stance_frames`` (default 100,000) — per-env single-stance
-      frames before the ramp begins.
-    - ``ramp_single_stance_frames`` (default 200,000) — additional per-env
-      single-stance frames over which the weight linearly reaches
-      ``end_weight``.
-
-    A ``common_step_counter``-based fallback (``safety_steps_per_env``,
-    default 1,000,000 steps per env) prevents the weight from remaining at
-    zero after a training resume, where the in-memory accumulator is reset.
-
-    Additionally, a velocity-tracking gate (``vel_tracking_threshold`` /
-    ``vel_tracking_target``) scales down the weight when the population's
-    average ``tracking_exp_vel_xy`` is poor, ensuring the weight only
-    ramps up once the robot can actually track commanded velocities.
-
-    The default ``end_weight=None`` picks up whatever weight is set in the
-    config, so the curriculum stays in sync if the config changes.
+    The default ``end_weight=None`` picks up whatever weight is set in
+    the reward config, so the curriculum stays in sync.
     """
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
         self._reward_term_name = cfg.params.get("reward_term_name", "foothold_proximity")
+        self._command_name = cfg.params.get("command_name", "base_velocity")
         self._term_cfg = None
         self._initial_weight = None
+        self._vel_tracking_ema = 0.0
 
     def __call__(
         self,
@@ -100,11 +85,9 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
         reward_term_name: str = "foothold_proximity",
         start_weight: float = 0.0,
         end_weight: float | None = None,
-        min_single_stance_frames: int = 100_000,
-        ramp_single_stance_frames: int = 200_000,
-        safety_steps_per_env: int = 1_000_000,
         vel_tracking_threshold: float = 0.3,
         vel_tracking_target: float = 0.8,
+        vel_ema_alpha: float = 0.005,
     ) -> dict:
         if self._term_cfg is None:
             try:
@@ -114,58 +97,50 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
                 pass
 
         if self._term_cfg is None:
-            return {"weight": start_weight, "xor_progress": 0.0, "step_progress": 0.0, "vel_factor": 1.0, "base_progress": 0.0, "progress": 0.0, "tracking_score": 0.0}
+            return {"weight": start_weight, "vel_factor": 1.0, "vel_tracking_ema": self._vel_tracking_ema, "instant_tracking": 0.0}
 
         if end_weight is None:
             end_weight = self._initial_weight
 
-        num_envs = env.num_envs
-        total = self._term_cfg.func.cumulative_single_stance_frames
-        total_per_env = total / num_envs
+        # Velocity-tracking gate: scale the weight by the population's
+        # instantaneous tracking quality (EMA-smoothed across episodes).
+        try:
+            command = env.command_manager.get_term(self._command_name)
+            robot = command.robot
+            lin_vel_error = torch.sum(
+                torch.square(
+                    command.vel_command_b[:, :2] - robot.data.root_lin_vel_b[:, :2]
+                ),
+                dim=1,
+            )
+            instant_tracking = torch.exp(
+                -lin_vel_error / (command.cfg.lin_vel_metrics_std**2)
+            ).mean().item()
+        except (ValueError, KeyError, AttributeError):
+            instant_tracking = 0.0
 
-        if total_per_env < min_single_stance_frames:
-            xor_progress = 0.0
+        self._vel_tracking_ema = (
+            vel_ema_alpha * instant_tracking
+            + (1.0 - vel_ema_alpha) * self._vel_tracking_ema
+        )
+
+        if (
+            self._vel_tracking_ema < vel_tracking_threshold
+            or vel_tracking_target <= vel_tracking_threshold
+        ):
+            vel_factor = 0.0 if self._vel_tracking_ema < vel_tracking_threshold else 1.0
         else:
-            xor_progress = min(
-                (total_per_env - min_single_stance_frames) / ramp_single_stance_frames,
+            vel_factor = min(
+                (self._vel_tracking_ema - vel_tracking_threshold)
+                / (vel_tracking_target - vel_tracking_threshold),
                 1.0,
             )
 
-        # Fallback: common_step_counter-based schedule handles training resume
-        # where the in-memory accumulator starts from zero.
-        step_progress = min(
-            env.common_step_counter / (safety_steps_per_env * num_envs), 1.0
-        )
-
-        base_progress = max(xor_progress, step_progress)
-
-        # Velocity-tracking gate: scale down the weight when the population's
-        # average tracking score is poor, so the weight only ramps up once
-        # the robot can actually track commanded velocities.
-        try:
-            command = env.command_manager.get_term("base_velocity")
-            tracking_score = command.metrics["tracking_exp_vel_xy"].mean().item()
-            if tracking_score < vel_tracking_threshold or vel_tracking_target <= vel_tracking_threshold:
-                vel_factor = 0.0 if tracking_score < vel_tracking_threshold else 1.0
-            else:
-                vel_factor = min(
-                    (tracking_score - vel_tracking_threshold)
-                    / (vel_tracking_target - vel_tracking_threshold),
-                    1.0,
-                )
-        except (ValueError, KeyError):
-            vel_factor = 1.0
-            tracking_score = 0.0
-
-        progress = base_progress * vel_factor
-        new_weight = start_weight + (end_weight - start_weight) * progress
+        new_weight = start_weight + (end_weight - start_weight) * vel_factor
         self._term_cfg.weight = new_weight
         return {
             "weight": new_weight,
-            "xor_progress": xor_progress,
-            "step_progress": step_progress,
             "vel_factor": vel_factor,
-            "base_progress": base_progress,
-            "progress": progress,
-            "tracking_score": tracking_score,
+            "vel_tracking_ema": self._vel_tracking_ema,
+            "instant_tracking": instant_tracking,
         }

@@ -1017,10 +1017,8 @@ class CurriculumCfg:
             "reward_term_name": "foothold_proximity",
             "start_weight": 0.0,
             "end_weight": 20.0,
-            "min_single_stance_frames": 100_000,
-            "ramp_single_stance_frames": 200_000,
             "vel_tracking_threshold": 0.5,
-            "vel_tracking_target": 0.6
+            "vel_tracking_target": 0.6,
         },
     )
 
