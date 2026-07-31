@@ -280,6 +280,8 @@ class FootholdReward(ManagerTermBase):
         self._planner = DCMFootholdPlanner(
             num_envs=env.num_envs,
             device=env.device,
+            max_fwd_range=cfg.params.get("max_fwd_range", 0.4),
+            max_bwd_range=cfg.params.get("max_bwd_range", 0.0),
         )
         # Per-foot caching: [left, right] order (as returned by body_ids)
         # Lazily initialised with actual foot positions on first __call__ to
@@ -482,6 +484,8 @@ class FootholdReward(ManagerTermBase):
         env: "ManagerBasedRLEnv",
         proximity_weight: float | None = None,
         bezier_weight: float | None = None,
+        max_fwd_range: float | None = None,
+        max_bwd_range: float | None = None,
         sigma_p: float = 10.0,
         debug_vis: bool = False,
         sigma_d: float | None = None,

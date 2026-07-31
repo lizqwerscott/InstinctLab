@@ -781,6 +781,9 @@ class G1Rewards:
             # 内部状态权重
             "proximity_weight": 1.0,
             "bezier_weight": 1.0,
+            # DCM 规划器落点搜索范围 (沿 x 轴, 前后对称可配)
+            "max_fwd_range": 0.4,
+            "max_bwd_range": 0.0,
             "sigma_p": 10.0,
             # Bézier 参数 (bezier_weight>0 时生效; 默认值与 __init__ 一致)
             "sigma_d": 0.0,

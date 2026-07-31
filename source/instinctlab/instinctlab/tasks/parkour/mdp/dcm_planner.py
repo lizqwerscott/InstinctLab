@@ -13,6 +13,7 @@ One forward call returns p*_f for every env.
 
 from https://arxiv.org/abs/2601.10365v1 and https://arxiv.org/abs/2601.10365v1
 """
+
 import math
 import torch
 import torch.nn.functional as F
@@ -32,14 +33,22 @@ def _make_sobel_kernels(device, dtype=torch.float32):
     want to match an un-normalised Sobel (paper convention), remove the
     "/ 8.0" and increase alpha_E by ~8x.
     """
-    kx = torch.tensor(
-        [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
-        device=device, dtype=dtype,
-    ).view(1, 1, 3, 3) / 8.0
-    ky = torch.tensor(
-        [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
-        device=device, dtype=dtype,
-    ).view(1, 1, 3, 3) / 8.0
+    kx = (
+        torch.tensor(
+            [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
+            device=device,
+            dtype=dtype,
+        ).view(1, 1, 3, 3)
+        / 8.0
+    )
+    ky = (
+        torch.tensor(
+            [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
+            device=device,
+            dtype=dtype,
+        ).view(1, 1, 3, 3)
+        / 8.0
+    )
     return kx, ky
 
 
@@ -62,8 +71,8 @@ class DCMFootholdPlanner:
         self,
         num_envs: int,
         device: str,
-        grid_h: int = 25,        # rows = y direction
-        grid_w: int = 37,        # cols = x direction
+        grid_h: int = 25,  # rows = y direction
+        grid_w: int = 37,  # cols = x direction
         cell_size: float = 0.05,
         # LIPM
         z0: float = 0.82,
@@ -73,20 +82,21 @@ class DCMFootholdPlanner:
         fp_h: int = 2,
         fp_w: int = 4,
         # Cost weights
-        alpha_pos:   float = 3.0,
-        alpha_dcm:   float = 0.5,
-        alpha_E:     float = 0.6,
-        alpha_Q:     float = 4.0,
-        alpha_M:     float = 6.0,
+        alpha_pos: float = 3.0,
+        alpha_dcm: float = 0.5,
+        alpha_E: float = 0.6,
+        alpha_Q: float = 4.0,
+        alpha_M: float = 6.0,
         alpha_climb: float = 1.5,
-        beta:        float = 2.5,
+        beta: float = 2.5,
         # Velocity-aware feasibility
         h_min: float = 0.05,
         h_max: float = 0.28,
         v_star: float = 0.5,
         v_min: float = 0.05,
-        # Forward range mask (only consider cells ahead of pelvis)
+        # Range mask (cells within [-max_bwd_range, max_fwd_range] along x)
         max_fwd_range: float = 0.4,
+        max_bwd_range: float = 0.0,
     ):
         self.num_envs = num_envs
         self.device = device
@@ -99,11 +109,9 @@ class DCMFootholdPlanner:
         self.lp = lp
 
         # ---- Pre-compute cell-center coords in pelvis-local frame ----
-        xs = (torch.arange(grid_w, device=device, dtype=torch.float32)
-              - (grid_w - 1) / 2) * cell_size
-        ys = (torch.arange(grid_h, device=device, dtype=torch.float32)
-              - (grid_h - 1) / 2) * cell_size
-        self.grid_y, self.grid_x = torch.meshgrid(ys, xs, indexing='ij')
+        xs = (torch.arange(grid_w, device=device, dtype=torch.float32) - (grid_w - 1) / 2) * cell_size
+        ys = (torch.arange(grid_h, device=device, dtype=torch.float32) - (grid_h - 1) / 2) * cell_size
+        self.grid_y, self.grid_x = torch.meshgrid(ys, xs, indexing="ij")
 
         # ---- VHIP constants ----
         self.z0 = z0
@@ -114,22 +122,23 @@ class DCMFootholdPlanner:
         self.by_coef_flat = lp / (self.exp_wT_flat - 1.0)
 
         # ---- Cost weights ----
-        self.alpha_pos   = alpha_pos
-        self.alpha_dcm   = alpha_dcm
-        self.alpha_E     = alpha_E
-        self.alpha_Q     = alpha_Q
-        self.alpha_M     = alpha_M
+        self.alpha_pos = alpha_pos
+        self.alpha_dcm = alpha_dcm
+        self.alpha_E = alpha_E
+        self.alpha_Q = alpha_Q
+        self.alpha_M = alpha_M
         self.alpha_climb = alpha_climb
-        self.beta        = beta
+        self.beta = beta
 
         # ---- Feasibility ----
-        self.h_min  = h_min
-        self.h_max  = h_max
+        self.h_min = h_min
+        self.h_max = h_max
         self.v_star = v_star
-        self.v_min  = v_min
+        self.v_min = v_min
 
-        # ---- Forward range mask ----
+        # ---- Range mask ----
         self.max_fwd_range = max_fwd_range
+        self.max_bwd_range = max_bwd_range
 
         # ---- Sobel kernels ----
         self.kx, self.ky = _make_sobel_kernels(device)
@@ -137,9 +146,7 @@ class DCMFootholdPlanner:
     # -----------------------------------------------------------------------
     # Shared channel computation
     # -----------------------------------------------------------------------
-    def _compute_dcm_params(
-        self, k: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_dcm_params(self, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute per-environment DCM parameters for sloped terrain.
 
         Given slope k, the CoM height varies linearly with time:
@@ -195,13 +202,13 @@ class DCMFootholdPlanner:
 
     def _compute_channels(
         self,
-        heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
-        v_cmd: torch.Tensor,             # (N, 2) commanded velocity in pelvis-local
+        heightmap: torch.Tensor,  # (N, H, W) pelvis-local heights, NaN = invalid
+        v_cmd: torch.Tensor,  # (N, 2) commanded velocity in pelvis-local
         stance_xyz_local: torch.Tensor,  # (N, 3) stance foot in pelvis-local
-        swing_leg_sign: torch.Tensor,    # (N,) +-1
-        com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
+        swing_leg_sign: torch.Tensor,  # (N,) +-1
+        com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
-        k: torch.Tensor | None = None,    # (N,) per-environment slope, None = all flat
+        k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
     ) -> dict[str, torch.Tensor]:
         """Compute all intermediate cost channels.
 
@@ -215,18 +222,18 @@ class DCMFootholdPlanner:
 
         # ---- Validity mask ----
         valid = ~torch.isnan(heightmap)
-        # Only consider cells within [0, max_fwd_range] ahead of pelvis
-        x_mask = (self.grid_x >= 0.0) & (self.grid_x <= self.max_fwd_range)
+        # Only consider cells within [-max_bwd_range, max_fwd_range] along x
+        x_mask = (self.grid_x >= -self.max_bwd_range) & (self.grid_x <= self.max_fwd_range)
         valid = valid & x_mask.unsqueeze(0)
 
         # Q: -inf/+inf sentinels so invalid cells never win max/min.
         h_for_max = torch.where(
-            valid, heightmap,
-            torch.tensor(float('-inf'), device=device, dtype=heightmap.dtype),
+            valid,
+            heightmap,
+            torch.tensor(float("-inf"), device=device, dtype=heightmap.dtype),
         ).unsqueeze(1)
         h_for_min = torch.where(
-            valid, -heightmap,
-            torch.tensor(float('-inf'), device=device, dtype=heightmap.dtype)
+            valid, -heightmap, torch.tensor(float("-inf"), device=device, dtype=heightmap.dtype)
         ).unsqueeze(1)
 
         # For M, E, and argmin z-lookup: 0-fill (neutral for dz).
@@ -237,10 +244,8 @@ class DCMFootholdPlanner:
         # =================================================================
         # Channel 1: Flatness Q (Eq. 2)
         # =================================================================
-        Q_max = F.max_pool2d(h_for_max, (self.fp_h, self.fp_w), stride=1,
-                             padding=(pad_h, pad_w))
-        Q_neg_min = F.max_pool2d(h_for_min, (self.fp_h, self.fp_w), stride=1,
-                                 padding=(pad_h, pad_w))
+        Q_max = F.max_pool2d(h_for_max, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w))
+        Q_neg_min = F.max_pool2d(h_for_min, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w))
         Q_min = -Q_neg_min
         Q = (Q_max - Q_min).squeeze(1)[:, :H, :W]
 
@@ -250,9 +255,8 @@ class DCMFootholdPlanner:
         h_in = h_safe.unsqueeze(1)
         gx = F.conv2d(h_in, self.kx, padding=1)
         gy = F.conv2d(h_in, self.ky, padding=1)
-        grad = torch.sqrt(gx ** 2 + gy ** 2 + 1e-6)
-        E = F.max_pool2d(grad, (self.fp_h, self.fp_w), stride=1,
-                         padding=(pad_h, pad_w)).squeeze(1)[:, :H, :W]
+        grad = torch.sqrt(gx**2 + gy**2 + 1e-6)
+        E = F.max_pool2d(grad, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w)).squeeze(1)[:, :H, :W]
 
         # =================================================================
         # Channel 3 & 4: Feasibility M and Climb bonus b (Eq. 4-5)
@@ -260,8 +264,7 @@ class DCMFootholdPlanner:
         vx = v_cmd[:, 0]
         vy = v_cmd[:, 1]
         vx_abs = vx.abs()
-        h_eff = self.h_min + (self.h_max - self.h_min) * torch.clamp(
-            vx_abs / self.v_star, 0.0, 1.0)
+        h_eff = self.h_min + (self.h_max - self.h_min) * torch.clamp(vx_abs / self.v_star, 0.0, 1.0)
         h_eff_map = h_eff.view(N, 1, 1)
 
         stance_z = stance_xyz_local[:, 2]
@@ -283,8 +286,8 @@ class DCMFootholdPlanner:
         sgn_map = swing_leg_sign.view(N, 1, 1).float()
 
         # ---- Nominal step length and width (common to d_pos and b_nom) ----
-        L_nom = vx_map * self.T                        # (N,1,1)  = vx·T
-        W_nom = vy_map * self.T + sgn_map * self.lp    # (N,1,1)  = vy·T + (-1)ⁱ·l
+        L_nom = vx_map * self.T  # (N,1,1)  = vx·T
+        W_nom = vy_map * self.T + sgn_map * self.lp  # (N,1,1)  = vy·T + (-1)ⁱ·l
 
         d_pos = (gx_map - L_nom) ** 2 + self.beta * (gy_map - W_nom) ** 2
 
@@ -351,26 +354,34 @@ class DCMFootholdPlanner:
                 xi_T_x = gx_map + bx_map
                 xi_T_y = gy_map + by_map
 
-        d_dcm = ((xi_T_x - gx_map - bx_map) ** 2
-                 + (xi_T_y - gy_map - by_map) ** 2)
+        d_dcm = (xi_T_x - gx_map - bx_map) ** 2 + (xi_T_y - gy_map - by_map) ** 2
 
         # =================================================================
         # Total cost (Eq. 1)
         # =================================================================
-        J = (self.alpha_pos   * d_pos +
-             self.alpha_dcm   * d_dcm +
-             self.alpha_E     * E +
-             self.alpha_Q     * Q +
-             self.alpha_M     * M -
-             self.alpha_climb * b)
+        J = (
+            self.alpha_pos * d_pos
+            + self.alpha_dcm * d_dcm
+            + self.alpha_E * E
+            + self.alpha_Q * Q
+            + self.alpha_M * M
+            - self.alpha_climb * b
+        )
 
-        J = torch.where(valid, J, torch.full_like(J, float('inf')))
+        J = torch.where(valid, J, torch.full_like(J, float("inf")))
 
         return {
-            'Q': Q, 'E': E, 'M': M, 'b': b,
-            'd_pos': d_pos, 'd_dcm': d_dcm, 'J': J,
-            'valid': valid, 'h_safe': h_safe,
-            'L_nom': L_nom, 'W_nom': W_nom,
+            "Q": Q,
+            "E": E,
+            "M": M,
+            "b": b,
+            "d_pos": d_pos,
+            "d_dcm": d_dcm,
+            "J": J,
+            "valid": valid,
+            "h_safe": h_safe,
+            "L_nom": L_nom,
+            "W_nom": W_nom,
         }
 
     # -----------------------------------------------------------------------
@@ -378,27 +389,31 @@ class DCMFootholdPlanner:
     # -----------------------------------------------------------------------
     def plan(
         self,
-        heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
-        v_cmd: torch.Tensor,             # (N, 2) commanded velocity in pelvis-local
+        heightmap: torch.Tensor,  # (N, H, W) pelvis-local heights, NaN = invalid
+        v_cmd: torch.Tensor,  # (N, 2) commanded velocity in pelvis-local
         stance_xyz_local: torch.Tensor,  # (N, 3) stance foot in pelvis-local
-        swing_leg_sign: torch.Tensor,    # (N,) +-1
-        com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
+        swing_leg_sign: torch.Tensor,  # (N,) +-1
+        com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
-        k: torch.Tensor | None = None,    # (N,) per-environment slope, None = all flat
+        k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
     ) -> torch.Tensor:
         """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
         channels = self._compute_channels(
-            heightmap, v_cmd, stance_xyz_local, swing_leg_sign,
-            com_local, com_vel_local, k=k,
+            heightmap,
+            v_cmd,
+            stance_xyz_local,
+            swing_leg_sign,
+            com_local,
+            com_vel_local,
+            k=k,
         )
-        return self._argmin(channels['J'], channels['h_safe'],
-                            v_cmd[:, 0].abs(), stance_xyz_local)[0]
+        return self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)[0]
 
     def _argmin(
         self,
-        J: torch.Tensor,           # (N, H, W) total cost
-        h_safe: torch.Tensor,      # (N, H, W) safe heights
-        vx_abs: torch.Tensor,      # (N,) absolute forward velocity
+        J: torch.Tensor,  # (N, H, W) total cost
+        h_safe: torch.Tensor,  # (N, H, W) safe heights
+        vx_abs: torch.Tensor,  # (N,) absolute forward velocity
         stance_xyz_local: torch.Tensor,  # (N, 3) stance foot
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Argmin over J, return (p_star, best_idx) in pelvis-local.
@@ -410,7 +425,7 @@ class DCMFootholdPlanner:
         J_flat = J.view(N, -1)
         best_idx = torch.argmin(J_flat, dim=-1)
         i = best_idx // W
-        j = best_idx %  W
+        j = best_idx % W
 
         p_star_x = self.grid_x[i, j]
         p_star_y = self.grid_y[i, j]
@@ -431,13 +446,13 @@ class DCMFootholdPlanner:
 
     def plan_with_channels(
         self,
-        heightmap: torch.Tensor,         # (N, H, W) pelvis-local heights, NaN = invalid
-        v_cmd: torch.Tensor,             # (N, 2) commanded velocity in pelvis-local
+        heightmap: torch.Tensor,  # (N, H, W) pelvis-local heights, NaN = invalid
+        v_cmd: torch.Tensor,  # (N, 2) commanded velocity in pelvis-local
         stance_xyz_local: torch.Tensor,  # (N, 3) stance foot in pelvis-local
-        swing_leg_sign: torch.Tensor,    # (N,) +-1
-        com_local: torch.Tensor | None = None,      # (N, 2) CoM (x, y) in pelvis-local
+        swing_leg_sign: torch.Tensor,  # (N,) +-1
+        com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
-        k: torch.Tensor | None = None,    # (N,) per-environment slope, None = all flat
+        k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Returns (p_star, channels) where channels contains all intermediate costs.
 
@@ -445,25 +460,29 @@ class DCMFootholdPlanner:
         channels: dict with keys Q, E, M, b, d_pos, d_dcm, J, valid, h_safe.
         """
         channels = self._compute_channels(
-            heightmap, v_cmd, stance_xyz_local, swing_leg_sign,
-            com_local, com_vel_local, k=k,
+            heightmap,
+            v_cmd,
+            stance_xyz_local,
+            swing_leg_sign,
+            com_local,
+            com_vel_local,
+            k=k,
         )
-        p_star, best_idx = self._argmin(channels['J'], channels['h_safe'],
-                                         v_cmd[:, 0].abs(), stance_xyz_local)
-        channels['best_idx'] = best_idx
+        p_star, best_idx = self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)
+        channels["best_idx"] = best_idx
         return p_star, channels
 
     def plan_with_channels_in_world(
         self,
-        heightmap: torch.Tensor,            # (N, H, W) pelvis-local heights
-        v_cmd: torch.Tensor,                # (N, 2) world-frame velocity
-        stance_xyz_world: torch.Tensor,     # (N, 3) stance foot world pos
-        root_pos_w: torch.Tensor,           # (N, 3) pelvis world pos
-        root_quat_w: torch.Tensor,          # (N, 4) pelvis world quat (w,x,y,z)
-        swing_leg_sign: torch.Tensor,       # (N,)
-        com_pos_w: torch.Tensor | None = None,   # (N, 3) CoM world pos
-        com_vel_w: torch.Tensor | None = None,   # (N, 3) CoM world vel
-        k: torch.Tensor | None = None,      # (N,) per-environment slope
+        heightmap: torch.Tensor,  # (N, H, W) pelvis-local heights
+        v_cmd: torch.Tensor,  # (N, 2) world-frame velocity
+        stance_xyz_world: torch.Tensor,  # (N, 3) stance foot world pos
+        root_pos_w: torch.Tensor,  # (N, 3) pelvis world pos
+        root_quat_w: torch.Tensor,  # (N, 4) pelvis world quat (w,x,y,z)
+        swing_leg_sign: torch.Tensor,  # (N,)
+        com_pos_w: torch.Tensor | None = None,  # (N, 3) CoM world pos
+        com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
+        k: torch.Tensor | None = None,  # (N,) per-environment slope
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute best foothold in world frame + return all cost channels.
 
@@ -489,8 +508,13 @@ class DCMFootholdPlanner:
 
         # -- Plan in pelvis-local frame --
         p_local, channels = self.plan_with_channels(
-            heightmap, v_local, stance_local,
-            swing_leg_sign, com_local, com_vel_local, k=k,
+            heightmap,
+            v_local,
+            stance_local,
+            swing_leg_sign,
+            com_local,
+            com_vel_local,
+            k=k,
         )
 
         # -- Rotate back: pelvis-local -> world --
@@ -504,15 +528,15 @@ class DCMFootholdPlanner:
     # -----------------------------------------------------------------------
     def plan_in_world(
         self,
-        heightmap: torch.Tensor,            # (N, H, W) pelvis-local heights
-        v_cmd: torch.Tensor,                # (N, 2) world-frame velocity
-        stance_xyz_world: torch.Tensor,     # (N, 3) stance foot world pos
-        root_pos_w: torch.Tensor,           # (N, 3) pelvis world pos
-        root_quat_w: torch.Tensor,          # (N, 4) pelvis world quat (w,x,y,z)
-        swing_leg_sign: torch.Tensor,       # (N,)
-        com_pos_w: torch.Tensor | None = None,   # (N, 3) CoM world pos
-        com_vel_w: torch.Tensor | None = None,   # (N, 3) CoM world vel
-        k: torch.Tensor | None = None,      # (N,) per-environment slope
+        heightmap: torch.Tensor,  # (N, H, W) pelvis-local heights
+        v_cmd: torch.Tensor,  # (N, 2) world-frame velocity
+        stance_xyz_world: torch.Tensor,  # (N, 3) stance foot world pos
+        root_pos_w: torch.Tensor,  # (N, 3) pelvis world pos
+        root_quat_w: torch.Tensor,  # (N, 4) pelvis world quat (w,x,y,z)
+        swing_leg_sign: torch.Tensor,  # (N,)
+        com_pos_w: torch.Tensor | None = None,  # (N, 3) CoM world pos
+        com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
+        k: torch.Tensor | None = None,  # (N,) per-environment slope
     ) -> torch.Tensor:
         """Compute best foothold in world frame."""
         N = root_pos_w.shape[0]
@@ -533,8 +557,13 @@ class DCMFootholdPlanner:
 
         # -- Plan in pelvis-local frame --
         p_local = self.plan(
-            heightmap, v_local, stance_local,
-            swing_leg_sign, com_local, com_vel_local, k=k,
+            heightmap,
+            v_local,
+            stance_local,
+            swing_leg_sign,
+            com_local,
+            com_vel_local,
+            k=k,
         )
 
         # -- Rotate back: pelvis-local -> world (yaw-only, matching heightmap) --
