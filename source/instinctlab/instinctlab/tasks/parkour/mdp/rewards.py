@@ -515,8 +515,9 @@ class FootholdReward(ManagerTermBase):
         The signature mirrors the config ``params`` keys: Isaac Lab's
         ``_resolve_common_term_cfg`` requires every config param to appear as
         a (defaulted) argument of ``__call__`` or it raises ValueError at
-        startup. The values are resolved in ``__init__`` from ``cfg.params``
-        and are intentionally unused here.
+        startup. All values except ``sigma_p`` are resolved in ``__init__``
+        from ``cfg.params`` and are intentionally unused here; ``sigma_p`` is
+        read directly from the call argument.
         """
         asset = env.scene[self._asset_cfg.name]
 
