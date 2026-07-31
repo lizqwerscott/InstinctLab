@@ -44,9 +44,7 @@ def tracking_exp_vel(
     command = env.command_manager.get_term("base_velocity")
     tracking_exp_vel_xy = command.metrics["tracking_exp_vel_xy"][env_ids]
     tracking_exp_vel_yaw = command.metrics["tracking_exp_vel_yaw"][env_ids]
-    move_up = (tracking_exp_vel_xy > lin_vel_threshold[1]) * (
-        tracking_exp_vel_yaw > ang_vel_threshold[1]
-    )
+    move_up = (tracking_exp_vel_xy > lin_vel_threshold[1]) * (tracking_exp_vel_yaw > ang_vel_threshold[1])
     move_down = tracking_exp_vel_xy < lin_vel_threshold[0]
     move_down *= ~move_up
     # update terrain levels
@@ -55,9 +53,9 @@ def tracking_exp_vel(
     return torch.mean(terrain.terrain_levels.float())
 
 
-class foothold_proximity_weight_schedule(ManagerTermBase):
-    """Curriculum that gates the foothold_proximity reward weight behind
-    velocity tracking performance.
+class foothold_weight_schedule(ManagerTermBase):
+    """Curriculum that gates the combined foothold reward's total weight
+    (RewTerm.weight) behind velocity tracking performance.
 
     The weight linearly ramps from ``start_weight`` to ``end_weight``
     based on the population's average instantaneous velocity tracking
@@ -72,7 +70,7 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-        self._reward_term_name = cfg.params.get("reward_term_name", "foothold_proximity")
+        self._reward_term_name = cfg.params.get("reward_term_name", "foothold")
         self._command_name = cfg.params.get("command_name", "base_velocity")
         self._term_cfg = None
         self._initial_weight = None
@@ -82,7 +80,7 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
         self,
         env: ManagerBasedRLEnv,
         env_ids: Sequence[int],
-        reward_term_name: str = "foothold_proximity",
+        reward_term_name: str = "foothold",
         start_weight: float = 0.0,
         end_weight: float | None = None,
         vel_tracking_threshold: float = 0.3,
@@ -97,7 +95,12 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
                 pass
 
         if self._term_cfg is None:
-            return {"weight": start_weight, "vel_factor": 1.0, "vel_tracking_ema": self._vel_tracking_ema, "instant_tracking": 0.0}
+            return {
+                "weight": start_weight,
+                "vel_factor": 1.0,
+                "vel_tracking_ema": self._vel_tracking_ema,
+                "instant_tracking": 0.0,
+            }
 
         if end_weight is None:
             end_weight = self._initial_weight
@@ -108,31 +111,20 @@ class foothold_proximity_weight_schedule(ManagerTermBase):
             command = env.command_manager.get_term(self._command_name)
             robot = command.robot
             lin_vel_error = torch.sum(
-                torch.square(
-                    command.vel_command_b[:, :2] - robot.data.root_lin_vel_b[:, :2]
-                ),
+                torch.square(command.vel_command_b[:, :2] - robot.data.root_lin_vel_b[:, :2]),
                 dim=1,
             )
-            instant_tracking = torch.exp(
-                -lin_vel_error / (command.cfg.lin_vel_metrics_std**2)
-            ).mean().item()
+            instant_tracking = torch.exp(-lin_vel_error / (command.cfg.lin_vel_metrics_std**2)).mean().item()
         except (ValueError, KeyError, AttributeError):
             instant_tracking = 0.0
 
-        self._vel_tracking_ema = (
-            vel_ema_alpha * instant_tracking
-            + (1.0 - vel_ema_alpha) * self._vel_tracking_ema
-        )
+        self._vel_tracking_ema = vel_ema_alpha * instant_tracking + (1.0 - vel_ema_alpha) * self._vel_tracking_ema
 
-        if (
-            self._vel_tracking_ema < vel_tracking_threshold
-            or vel_tracking_target <= vel_tracking_threshold
-        ):
+        if self._vel_tracking_ema < vel_tracking_threshold or vel_tracking_target <= vel_tracking_threshold:
             vel_factor = 0.0 if self._vel_tracking_ema < vel_tracking_threshold else 1.0
         else:
             vel_factor = min(
-                (self._vel_tracking_ema - vel_tracking_threshold)
-                / (vel_tracking_target - vel_tracking_threshold),
+                (self._vel_tracking_ema - vel_tracking_threshold) / (vel_tracking_target - vel_tracking_threshold),
                 1.0,
             )
 
