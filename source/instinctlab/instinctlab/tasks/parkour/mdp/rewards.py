@@ -480,15 +480,43 @@ class FootholdReward(ManagerTermBase):
     def __call__(
         self,
         env: "ManagerBasedRLEnv",
+        proximity_weight: float | None = None,
+        bezier_weight: float | None = None,
         sigma_p: float = 10.0,
         debug_vis: bool = False,
-        **kwargs,
+        sigma_d: float | None = None,
+        T_swing: float | None = None,
+        kappa: float | None = None,
+        b_min: float | None = None,
+        b_max: float | None = None,
+        c_min: float | None = None,
+        c_scale: float | None = None,
+        c_max: float | None = None,
+        delta_l_minus: float | None = None,
+        delta_l_plus: float | None = None,
+        delta_r_minus: float | None = None,
+        delta_r_plus: float | None = None,
+        x_tol: float | None = None,
+        x_tol_soft: float | None = None,
+        window_early: float | None = None,
+        window_late: float | None = None,
+        window_early_soft: float | None = None,
+        window_late_soft: float | None = None,
+        penalty_soft: float | None = None,
+        penalty_multiplier: float | None = None,
+        heightmap_sensor_cfg: SceneEntityCfg | None = None,
+        asset_cfg: SceneEntityCfg | None = None,
+        sensor_cfg: SceneEntityCfg | None = None,
+        ankle_offset: float | None = None,
+        terrain_names: list[str] | None = None,
     ) -> torch.Tensor:
         """Compute the combined foothold reward.
 
-        All tuning params (T_swing, kappa, windows, etc.) are resolved in
-        __init__ from cfg.params; **kwargs absorbs the remaining config
-        params passed by the reward manager so the signature stays lean.
+        The signature mirrors the config ``params`` keys: Isaac Lab's
+        ``_resolve_common_term_cfg`` requires every config param to appear as
+        a (defaulted) argument of ``__call__`` or it raises ValueError at
+        startup. The values are resolved in ``__init__`` from ``cfg.params``
+        and are intentionally unused here.
         """
         asset = env.scene[self._asset_cfg.name]
 
