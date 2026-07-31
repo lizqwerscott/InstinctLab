@@ -16,7 +16,10 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 from instinctlab.tasks.parkour.mdp.dcm_planner import DCMFootholdPlanner
-from instinctlab.tasks.parkour.mdp.dcm_visualizer import DCMCostVisualizer
+from instinctlab.tasks.parkour.mdp.dcm_visualizer import (
+    DCMCostVisualizer,
+    clear_markers,
+)
 
 
 def feet_air_time(
@@ -713,7 +716,7 @@ class FootholdProximityReward(ManagerTermBase):
     # ------------------------------------------------------------------
     @staticmethod
     def _quat_from_z_to_dir(dir: torch.Tensor) -> torch.Tensor:
-        """Compute (N, 4) quaternion (x, y, z, w) rotating local z-axis to *dir*."""
+        """Compute (N, 4) quaternion (w, x, y, z) rotating local z-axis to *dir*."""
         z = torch.zeros_like(dir)
         z[:, 2] = 1.0
         dot = (z * dir).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
@@ -725,10 +728,10 @@ class FootholdProximityReward(ManagerTermBase):
         half_angle = torch.acos(dot) * 0.5
         axis = cross / (cross_norm + 1e-8)
         quat = torch.zeros(dir.shape[0], 4, device=dir.device)
-        quat[:, :3] = axis * torch.sin(half_angle)
-        quat[:, 3] = torch.cos(half_angle).squeeze(-1)
-        quat[parallel, :] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=dir.device)
-        return quat  # (N, 4) in (x, y, z, w) format
+        quat[:, 0] = torch.cos(half_angle).squeeze(-1)
+        quat[:, 1:] = axis * torch.sin(half_angle)
+        quat[parallel, :] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=dir.device)
+        return quat  # (N, 4) in (w, x, y, z) format — matches VisualizationMarkers
 
     # ------------------------------------------------------------------
     def _debug_vis_callback(self, event):
@@ -852,7 +855,7 @@ class FootholdProximityReward(ManagerTermBase):
                         ),
                     )
                 else:
-                    self._foot_target_line_vis.visualize(translations=None)
+                    clear_markers(self._foot_target_line_vis, self._planner.device)
 
         # ---- Event flash markers (yellow=swing_onset, white=touchdown) ----
         if hasattr(self, "_event_vis") and self._event_vis is not None:
@@ -897,7 +900,7 @@ class FootholdProximityReward(ManagerTermBase):
                         marker_indices=all_idx,
                     )
                 else:
-                    self._event_vis.visualize(translations=None)
+                    clear_markers(self._event_vis, self._planner.device)
 
         # ---- Nominal foothold marker (orange sphere at L_nom, W_nom, terrain_z) ----
         if hasattr(self, "_nominal_vis") and self._nominal_vis is not None:
@@ -971,7 +974,7 @@ class FootholdProximityReward(ManagerTermBase):
                         ),
                     )
                 else:
-                    self._nominal_vis.visualize(translations=None)
+                    clear_markers(self._nominal_vis, self._planner.device)
 
         # ---- Stair height vertical line (from h_center to h_fwd at fwd_dist ahead) ----
         if (
@@ -1026,9 +1029,9 @@ class FootholdProximityReward(ManagerTermBase):
                         marker_indices=None,
                     )
                 else:
-                    self._h_line_vis.visualize(translations=None)
+                    clear_markers(self._h_line_vis, self._planner.device)
             else:
-                self._h_line_vis.visualize(translations=None)
+                clear_markers(self._h_line_vis, self._planner.device)
 
     # ------------------------------------------------------------------
     def reset(self, env_ids: torch.Tensor | None = None):

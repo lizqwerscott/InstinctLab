@@ -16,6 +16,21 @@ from isaaclab.sim import CuboidCfg, PreviewSurfaceCfg
 from isaaclab.utils.math import quat_apply_inverse
 
 
+def clear_markers(visualizer: VisualizationMarkers, device):
+    """Hide all markers of *visualizer* without raising.
+
+    ``visualize(translations=None)`` with no marker indices raises
+    ``ValueError`` while the instancer still holds instances (the empty
+    call is guarded by ``num_markers == 0``).  Passing an empty
+    ``marker_indices`` tensor brings the instance count to zero, which
+    both hides everything and makes later calls safe again.
+    """
+    visualizer.visualize(
+        translations=None,
+        marker_indices=torch.zeros(0, dtype=torch.int, device=device),
+    )
+
+
 def _build_colored_cube_markers(
     num_bins: int = 20,
     base_prim_path: str = "/Visuals/DCMCostMap",
@@ -130,98 +145,100 @@ class DCMCostVisualizer:
         n_envs = channels["J"].shape[0]
         ch_name = self._active_channel
 
-        cost = channels[ch_name]           # (N, H, W)
+        cost = channels[ch_name]                       # (N, H, W)
         if "valid" in channels:
-            valid = channels["valid"]      # (N, H, W) bool
+            valid = channels["valid"]                 # (N, H, W) bool
         else:
             valid = torch.ones_like(cost, dtype=torch.bool)
         if "h_safe" in channels:
-            h_safe = channels["h_safe"]   # (N, H, W)
+            h_safe = channels["h_safe"]              # (N, H, W)
         else:
-            h_safe = heightmap             # (N, H, W)
+            h_safe = heightmap                        # (N, H, W)
 
-        all_world_pos = []
-        all_bin_idx = []
-        sel_world_pos: list[torch.Tensor] = []
-        sel_bin_idx: list[torch.Tensor] = []
-
-        for i in range(n_envs):
-            # Skip envs where both feet are in contact (no swing to show)
-            if in_contact is not None and i < in_contact.shape[0]:
-                if in_contact[i, 0].item() and in_contact[i, 1].item():
-                    continue
-
-            c = cost[i].reshape(-1)          # (H*W,)
-            v = valid[i].reshape(-1)         # (H*W,) bool
-            z = h_safe[i].reshape(-1)        # (H*W,)
-
-            mask = v
-            n_valid = mask.sum().item()
-            if n_valid == 0:
-                continue
-
-            # Min-max normalise → quantise to 0 … 19
-            c_sel = c[mask]
-            c_min, c_max = c_sel.min(), c_sel.max()
-            if c_max > c_min:
-                c_norm = (c_sel - c_min) / (c_max - c_min)
-            else:
-                c_norm = torch.zeros_like(c_sel)
-            bin_idx = (c_norm * 19).long().clamp(0, 19)  # keep on original device
-
-            # Build local positions
-            # Lift markers by a small fixed offset so they float above the terrain
-            # and are clearly visible (avoids being partially buried / occluded).
-            local_pos = torch.stack(
-                [self._gx[mask], self._gy[mask], z[mask] + 0.5], dim=-1
-            )  # (n_valid, 3)
-
-            # Rotate pelvis-local → world: p_w = R(q) @ p_local + t
-            q_conj = root_quat_w[i].clone()
-            q_conj[1:] *= -1.0
-            world_pos = quat_apply_inverse(q_conj, local_pos) + root_pos_w[i]
-
-            all_world_pos.append(world_pos)
-            all_bin_idx.append(bin_idx)
-
-            # ---- Selected cell (red cube) ----
-            best_idx = channels.get("best_idx")  # (N,) flat index or None
-            if best_idx is not None:
-                bi = best_idx[i].item()
-                if bi >= 0:  # valid (not low-speed override)
-                    # Convert flat index to local (x, y, z)
-                    sx = self._gx[bi]
-                    sy = self._gy[bi]
-                    sz = h_safe[i].reshape(-1)[bi]
-                    sel_local = torch.tensor(
-                        [sx, sy, sz + 0.5], device=self._device
-                    ).unsqueeze(0)  # (1, 3)
-                    # Transform to world
-                    q_conj = root_quat_w[i].clone()
-                    q_conj[1:] *= -1.0
-                    sel_world = quat_apply_inverse(
-                        q_conj, sel_local
-                    ) + root_pos_w[i]
-                    sel_world_pos.append(sel_world)
-                    # index = 20 (the "selected" prototype)
-                    sel_bin_idx.append(
-                        torch.tensor([20], device=self._device, dtype=torch.long)
-                    )
-
-        if not all_world_pos:
-            self._visualizer.visualize(translations=None)
+        # Keep envs with at least one swing foot (skip both-in-contact),
+        # and envs that have no valid cell at all (nothing to render).
+        keep = torch.ones(n_envs, dtype=torch.bool, device=self._device)
+        if in_contact is not None and in_contact.shape[0] >= n_envs:
+            keep = keep & ~(in_contact[:, 0] & in_contact[:, 1])
+        keep = keep & valid.reshape(n_envs, -1).any(dim=1)
+        if not bool(keep.any()):
+            clear_markers(self._visualizer, self._device)
             return
 
-        # Merge heatmap markers and selected markers into one call
-        all_pos = [torch.cat(all_world_pos, dim=0)]
-        all_idx = [torch.cat(all_bin_idx, dim=0)]
-        if sel_world_pos:
-            all_pos.append(torch.cat(sel_world_pos, dim=0))
-            all_idx.append(torch.cat(sel_bin_idx, dim=0))
+        cost = cost[keep]
+        valid = valid[keep]
+        h_safe = h_safe[keep]
+        root_pos_w = root_pos_w[keep]
+        root_quat_w = root_quat_w[keep]
+
+        M, H, W = cost.shape
+        HW = H * W
+        c_flat = cost.reshape(M, HW)                  # (M, HW)
+        v_flat = valid.reshape(M, HW)                 # (M, HW) bool
+        z_flat = h_safe.reshape(M, HW)                # (M, HW)
+
+        # Per-env min-max normalisation over valid cells (fully vectorised).
+        c_min = torch.where(
+            v_flat, c_flat, torch.full_like(c_flat, float("inf"))
+        ).min(dim=1).values                            # (M,)
+        c_max = torch.where(
+            v_flat, c_flat, torch.full_like(c_flat, float("-inf"))
+        ).max(dim=1).values                            # (M,)
+        span = (c_max - c_min).clamp(min=1e-8)
+        c_norm = ((c_flat - c_min[:, None]) / span[:, None]).clamp(0.0, 1.0)
+        bin_idx = (c_norm * 19.0).long().clamp(0, 19)  # (M, HW)
+
+        # Pelvis-local cell positions, lifted above the terrain for visibility.
+        gx_all = self._gx.unsqueeze(0).expand(M, HW)
+        gy_all = self._gy.unsqueeze(0).expand(M, HW)
+        local_pos = torch.stack([gx_all, gy_all, z_flat + 0.5], dim=-1)  # (M, HW, 3)
+
+        # Rotate pelvis-local -> world for every cell in one batched call.
+        q_conj = root_quat_w.clone()
+        q_conj[:, 1:] *= -1.0
+        q_cells = q_conj[:, None, :].expand(M, HW, 4).reshape(-1, 4)
+        world_pos = quat_apply_inverse(q_cells, local_pos.reshape(-1, 3))
+        world_pos = world_pos.reshape(M, HW, 3) + root_pos_w[:, None, :]  # (M, HW, 3)
+
+        # Gather only valid cells into a flat marker array.
+        world_pos_v = world_pos[v_flat]               # (K, 3)
+        bin_v = bin_idx[v_flat]                       # (K,)
+
+        # Selected (argmin) cells — bright-red cube prototype (index 20).
+        sel_world = None
+        best_idx = channels.get("best_idx")           # (N,) flat index or None
+        if best_idx is not None:
+            best_m = best_idx[keep]                   # (M,)
+            ok = best_m >= 0
+            if bool(ok.any()):
+                row = torch.arange(M, device=self._device)
+                bi = best_m.clamp(min=0)              # (M,)  (low-speed override -> -1)
+                sel_z = z_flat[row, bi]               # (M,)
+                sel_local = torch.stack(
+                    [self._gx[bi], self._gy[bi], sel_z + 0.5], dim=-1
+                )                                     # (M, 3)
+                sel_world = quat_apply_inverse(q_conj, sel_local) + root_pos_w
+                sel_world = sel_world[ok]             # (L, 3)
+
+        if world_pos_v.shape[0] == 0 and (
+            sel_world is None or sel_world.shape[0] == 0
+        ):
+            clear_markers(self._visualizer, self._device)
+            return
+
+        parts_pos = [world_pos_v]
+        parts_idx = [bin_v]
+        if sel_world is not None and sel_world.shape[0] > 0:
+            parts_pos.append(sel_world)
+            parts_idx.append(
+                torch.full(
+                    (sel_world.shape[0],), 20, dtype=torch.long, device=self._device
+                )
+            )
 
         self._visualizer.visualize(
-            translations=torch.cat(all_pos, dim=0),
-            marker_indices=torch.cat(all_idx, dim=0),
+            translations=torch.cat(parts_pos, dim=0),
+            marker_indices=torch.cat(parts_idx, dim=0),
         )
 
     def set_active_channel(self, name: str):
