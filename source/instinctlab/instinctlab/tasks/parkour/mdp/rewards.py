@@ -1185,7 +1185,7 @@ class FootholdReward(ManagerTermBase):
                 all_idx = torch.cat(bezier_indices, dim=0)
                 self._bezier_vis.visualize(translations=all_poses, marker_indices=all_idx)
             else:
-                self._bezier_vis.visualize(translations=None)
+                clear_markers(self._bezier_vis, self._planner.device)
 
     # ------------------------------------------------------------------
 
