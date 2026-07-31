@@ -133,6 +133,15 @@ class G1ParkourRoughEnvCfg_PLAY(G1ParkourRoughEnvCfg):
             "velocity_range": (0.0, 0.0),
         }
 
+        # ---- Foothold debug visualization in play ----
+        # 训练课程 (foothold_weight_schedule) 把 foothold 权重从 0 ramp;
+        # weight==0 时 MultiRewardManager 跳过该 term → FootholdReward.__call__
+        # 从不执行 → debug 可视化回调无数据可渲染。play 禁用该课程、固定非零
+        # 权重并打开 debug_vis (term 在首次执行时按此配置实例化)。
+        self.curriculum.foothold_weight = None
+        self.rewards.rewards.foothold.weight = 10.0
+        self.rewards.rewards.foothold.params["debug_vis"] = True
+
 
 @configclass
 class G1ParkourEnvCfg(G1ParkourRoughEnvCfg, ShoeConfigMixin):
