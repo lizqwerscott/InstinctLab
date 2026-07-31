@@ -782,7 +782,12 @@ class G1Rewards:
             "proximity_weight": 1.0,
             "bezier_weight": 1.0,
             # DCM 规划器落点搜索范围 (沿 x 轴, 前后对称可配)
-            "max_fwd_range": 0.4,
+            #   前方 max_fwd_range 合理区间: [0.4, 0.75]
+            #     0.4 = 仅够 0.8 m/s 步态, 无裕量; 0.6 = 覆盖 1.0 m/s 大步 + 上坡/楼梯裕量
+            #     (bezier 分支验证值); 网格上限 ±0.9m (37 列 × 0.05m), 超过 0.75 收益递减,
+            #     且有效单元线性增加 → 每帧 costmap 算力上升。
+            #   后方 max_bwd_range: 0 = 禁用向后落点; 后退/原地步态设 0.1~0.2。
+            "max_fwd_range": 0.6,
             "max_bwd_range": 0.0,
             "sigma_p": 10.0,
             # Bézier 参数 (bezier_weight>0 时生效; 默认值与 __init__ 一致)

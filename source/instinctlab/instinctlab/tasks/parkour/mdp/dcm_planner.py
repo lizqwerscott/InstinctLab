@@ -95,7 +95,7 @@ class DCMFootholdPlanner:
         v_star: float = 0.5,
         v_min: float = 0.05,
         # Range mask (cells within [-max_bwd_range, max_fwd_range] along x)
-        max_fwd_range: float = 0.4,
+        max_fwd_range: float = 0.6,
         max_bwd_range: float = 0.0,
     ):
         self.num_envs = num_envs
