@@ -207,16 +207,17 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
 
 
 class FootholdReward(ManagerTermBase):
-    """Combined foothold reward: one-shot touchdown (proximity) + per-frame
+    """Combined foothold reward: sparse touchdown (proximity) + dense per-frame
     Bézier swing tracking in a single reward term.
 
     The external RewTerm weight scales the total reward. Inside the term,
     ``proximity_weight`` and ``bezier_weight`` select the state:
-      - proximity_weight > 0, bezier_weight == 0  → original touchdown reward only
-      - proximity_weight == 0, bezier_weight > 0  → Bézier tracking only
+      - proximity_weight > 0, bezier_weight == 0  → sparse touchdown reward only
+      - proximity_weight == 0, bezier_weight > 0  → dense Bézier tracking only
       - both > 0                                  → both components summed
     The two components share one DCM planner, one phase-state machine and one
-    foothold-target cache (single per-frame pipeline).
+    foothold-target cache (single per-frame pipeline). No touchdown/over-time
+    penalties are applied.
     """
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv"):
@@ -241,26 +242,6 @@ class FootholdReward(ManagerTermBase):
         self._delta_r_minus = cfg.params.get("delta_r_minus", 0.05)
         self._delta_r_plus = cfg.params.get("delta_r_plus", 0.25)
         self._sigma_d = cfg.params.get("sigma_d", 0.0)
-
-        # ---- Swing completion enforcement (three-tier) ----
-        # Tier 1 (complete, no penalty):
-        #   u_time ∈ [window_early, window_late]  AND  Δx²+β·Δy² ≤ x_tol²
-        # Tier 2 (soft penalty, −1.5× cum_reward):
-        #   u_time ∈ [window_early_soft, window_late_soft]  AND
-        #   Δx²+β·Δy² ≤ x_tol_soft²   (but NOT Tier 1)
-        # Tier 3 (hard penalty, −2.0× cum_reward): everything else.
-        self._x_tol = cfg.params.get("x_tol", 0.04)
-        self._x_tol_soft = cfg.params.get("x_tol_soft", 0.08)
-        self._window_early = cfg.params.get("window_early", 0.8)
-        self._window_late = cfg.params.get("window_late", 1.2)
-        self._window_early_soft = cfg.params.get("window_early_soft", 0.6)
-        self._window_late_soft = cfg.params.get("window_late_soft", 1.4)
-        self._penalty_multiplier = cfg.params.get("penalty_multiplier", -2.0)
-        self._penalty_soft = cfg.params.get("penalty_soft", -1.5)
-
-        # Per-foot cumulative tracking reward since swing onset, used as the
-        # base for the early-termination penalty.
-        self._cum_reward = torch.zeros(env.num_envs, 2, device=env.device)
 
         # ---- Bézier swing trajectory state ----
         # Swing elapsed timer (seconds since lift-off, per foot)
@@ -500,14 +481,6 @@ class FootholdReward(ManagerTermBase):
         delta_l_plus: float | None = None,
         delta_r_minus: float | None = None,
         delta_r_plus: float | None = None,
-        x_tol: float | None = None,
-        x_tol_soft: float | None = None,
-        window_early: float | None = None,
-        window_late: float | None = None,
-        window_early_soft: float | None = None,
-        window_late_soft: float | None = None,
-        penalty_soft: float | None = None,
-        penalty_multiplier: float | None = None,
         heightmap_sensor_cfg: SceneEntityCfg | None = None,
         asset_cfg: SceneEntityCfg | None = None,
         sensor_cfg: SceneEntityCfg | None = None,
@@ -696,19 +669,16 @@ class FootholdReward(ManagerTermBase):
         touchdown = in_contact_smooth & (~self._was_in_contact)  # (N, 2)
         is_swinging = ~in_contact_smooth  # (N, 2)
 
-        # ---- 4b. Swing elapsed timer (always updated; drives bezier tier windows) --
+        # ---- 4b. Swing elapsed timer (always updated; drives bezier tracking window) --
         self._swing_elapsed += env.step_dt * is_swinging.float()  # (N, 2)
 
         reward = torch.zeros(env.num_envs, device=env.device)
         for foot_idx in range(2):
             # Shared swing-phase masks (both components vote on the same swing)
             td_mask = touchdown[:, foot_idx] & self._swing_planned[:, foot_idx]  # (N,)
-            overtime_mask = self._swing_planned[:, foot_idx] & (
-                self._swing_elapsed[:, foot_idx] > self._window_late_soft * self._T_swing
-            )  # (N,)
 
-            # ---- 4c-i. Bezier per-frame tracking reward (verbatim from bezier line) --
-            # --- 4c-i. Tracking reward for currently-swinging feet ----------
+            # ---- 4c-i. Dense reward: Bézier per-frame tracking --------------------
+            # --- Tracking reward for currently-swinging feet ----------
             tracking_mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
             if tracking_mask.any():
                 # Quintic-smoothstep time warping (zero endpoint vel/acc).
@@ -759,71 +729,18 @@ class FootholdReward(ManagerTermBase):
                 # regardless of tracking quality → must actually advance the
                 # swing to earn meaningful reward.
                 tracking_quality = torch.exp(-sigma_p * pos_err_sq - self._sigma_d * ori_err_sq)
-                foot_reward = u * tracking_quality
-                reward[tracking_mask] += self._bezier_weight * foot_reward
-                self._cum_reward[tracking_mask, foot_idx] += foot_reward
+                reward[tracking_mask] += self._bezier_weight * u * tracking_quality
 
-            # ---- 4c-ii. Overtime enforcement (only when bezier active) ---------
-            if overtime_mask.any() and self._bezier_weight > 0.0:
-                penalty = self._penalty_multiplier * self._cum_reward[overtime_mask, foot_idx]
-                reward[overtime_mask] += self._bezier_weight * penalty
-
-                self._cum_reward[overtime_mask, foot_idx] = 0.0
-                self._swing_planned[overtime_mask, foot_idx] = False
-
-            # ---- 4c-iii. Touchdown settlement (three-tier; overtime wins) -------
-            td_eff = td_mask & (~overtime_mask)
-            if td_eff.any() and self._bezier_weight > 0.0:
-                u_time_td = self._swing_elapsed[td_eff, foot_idx] / self._T_swing  # (M_td,) un-clamped
-
-                dx_td = foot_center[td_eff, foot_idx, 0] - self._p_star_cache[td_eff, foot_idx, 0]
-                dy_td = foot_center[td_eff, foot_idx, 1] - self._p_star_cache[td_eff, foot_idx, 1]
-                dist2 = dx_td**2 + self._planner.beta * dy_td**2  # (M_td,)
-
-                # ---- Tier 1: complete (no penalty) -------------------------
-                in_win1 = (u_time_td >= self._window_early) & (u_time_td <= self._window_late)
-                in_ell1 = dist2 <= self._x_tol**2
-                tier1 = in_win1 & in_ell1  # (M_td,)
-
-                # ---- Tier 2: soft penalty  (−1.5 × cum_reward) -------------
-                in_win2 = (u_time_td >= self._window_early_soft) & (u_time_td <= self._window_late_soft)
-                in_ell2 = dist2 <= self._x_tol_soft**2
-                tier2 = (~tier1) & in_win2 & in_ell2  # (M_td,)
-
-                # ---- Tier 3: hard penalty  (−2.0 × cum_reward) -------------
-                tier3 = (~tier1) & (~tier2)  # everything else
-
-                # Apply penalties (allocate N-sized masks)
-                is_tier2 = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-                is_tier2[td_eff] = tier2
-                if is_tier2.any():
-                    reward[is_tier2] += self._bezier_weight * (
-                        self._penalty_soft * self._cum_reward[is_tier2, foot_idx]
-                    )
-
-                is_tier3 = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-                is_tier3[td_eff] = tier3
-                if is_tier3.any():
-                    reward[is_tier3] += self._bezier_weight * (
-                        self._penalty_multiplier * self._cum_reward[is_tier3, foot_idx]
-                    )
-
-                # Clear state for all touchdown envs.
-                self._cum_reward[td_eff, foot_idx] = 0.0
-                self._swing_planned[td_eff, foot_idx] = False
-
-            # ---- 4c-iv. Proximity one-shot touchdown reward -------------------
+            # ---- 4c-ii. Sparse reward: one-shot proximity at touchdown ----------
             if self._proximity_weight > 0.0 and td_mask.any():
                 dist = foot_center[td_mask, foot_idx] - self._p_star_cache[td_mask, foot_idx]  # (M, 3)
                 dist_sq = (dist**2).sum(dim=-1)  # (M,)
                 foot_reward = torch.exp(-sigma_p * dist_sq)  # (M,)
                 reward[td_mask] += self._proximity_weight * foot_reward
 
-            # ---- 4c-v. Clear remaining swing flags (shared by both components) ---
-            clear = td_mask & self._swing_planned[:, foot_idx]
-            if clear.any():
-                self._cum_reward[clear, foot_idx] = 0.0
-                self._swing_planned[clear, foot_idx] = False
+            # ---- 4c-iii. Clear swing flags on touchdown (phase machine cleanup) ---
+            if td_mask.any():
+                self._swing_planned[td_mask, foot_idx] = False
 
         # ---- 4c. Velocity-condition gate -----------------------------------
         vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
@@ -1208,7 +1125,6 @@ class FootholdReward(ManagerTermBase):
         self._lift_off_pos[env_ids] = 0.0
         self._apex_cache[env_ids] = 0.0
         self._u_peak_cache[env_ids] = 0.0
-        self._cum_reward[env_ids] = 0.0
         if hasattr(self, "_event_timer"):
             self._event_timer[env_ids] = 0
         self._terrain_mask = None

@@ -803,18 +803,6 @@ class G1Rewards:
             "delta_l_plus": 0.05,
             "delta_r_minus": 0.05,
             "delta_r_plus": 0.25,
-            # Swing completion enforcement (three-tier)
-            # Tier 1 (complete):  [0.8T, 1.2T] & ellipse x≤4 cm
-            "x_tol": 0.04,
-            "window_early": 0.8,
-            "window_late": 1.2,
-            # Tier 2 (soft penalty): [0.6T, 1.4T] & ellipse x≤8 cm
-            "x_tol_soft": 0.08,
-            "window_early_soft": 0.6,
-            "window_late_soft": 1.4,
-            "penalty_soft": -1.5,
-            # Tier 3 (hard penalty): everything else
-            "penalty_multiplier": -2.0,
             "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
