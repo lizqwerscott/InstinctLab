@@ -269,19 +269,17 @@ class FootholdReward(ManagerTermBase):
         # avoid rendering spheres at the world origin (0,0,0).
         self._p_star_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
         self._p_star_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        # Previous-frame filtered contact state (used for rising-edge detection).
-        # Initialised all-True so the first swing_onset is reliable.
-        self._was_in_contact = torch.ones(env.num_envs, 2, dtype=torch.bool, device=env.device)
-
         # ---- Phase-state machine for swing-leg tracking -------------------
         # True  = left  leg is the swing leg (right leg is stance)
         # False = right leg is the swing leg (left  leg is stance)
         # Initialised to left-swing by default; reset() can randomise.
         self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
 
-        # Exponential-moving-average filter for raw contact signals.
-        # Smoothing prevents spurious phase switches from force noise.
-        self._contact_filtered = torch.ones(env.num_envs, 2, dtype=torch.float32, device=env.device)
+        # ---- Contact edge detection (window gating, replaces EMA) --------
+        # 边沿去抖参数 (秒): 连续离地/接触 ≥ edge_hold_time 才视为真实事件,
+        #   且 < edge_window 保证每个事件只触发一次 (无状态, 详见 _compute_rewards)。
+        self._edge_hold_time = cfg.params.get("edge_hold_time", 0.025)
+        self._edge_window = cfg.params.get("edge_window", 0.05)
 
         # Flag per foot indicating p_star_cache was set by a real plan (not lazy-init).
         # Set True at swing onset, reset False when the swing phase ends.
@@ -485,6 +483,8 @@ class FootholdReward(ManagerTermBase):
         asset_cfg: SceneEntityCfg | None = None,
         sensor_cfg: SceneEntityCfg | None = None,
         ankle_offset: float | None = None,
+        edge_hold_time: float | None = None,
+        edge_window: float | None = None,
         terrain_names: list[str] | None = None,
     ) -> torch.Tensor:
         """Compute the combined foothold reward.
@@ -512,15 +512,18 @@ class FootholdReward(ManagerTermBase):
         contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
         net_force = contact_sensor.data.net_forces_w_history  # (N, hist, n_bodies_all)
         contact_norm = torch.norm(net_force[:, -1, self._sensor_cfg.body_ids], dim=-1)  # (N, 2)
-        in_contact = contact_norm > 1.0  # (N, 2) raw
+        in_contact = contact_norm > 1.0  # (N, 2) 电平: 当前子步是否接触
 
-        # ---- 2a. Contact-signal EMA filter (avoids oscillation) ----------
-        contact_alpha = 0.85
-        self._contact_filtered = contact_alpha * self._contact_filtered + (1.0 - contact_alpha) * in_contact.float()
-        in_contact_smooth = self._contact_filtered > 0.3  # (N, 2)
-
-        # ---- 2b. Swing-onset detection (rising edge on filtered signal) ---
-        swing_onset = (~in_contact_smooth) & self._was_in_contact  # (N, 2)
+        # ---- 2a. Edge detection: window gating on sensor-integrated times ----
+        # 传感器在 200Hz 下累积 current_air_time / current_contact_time
+        # (内部用 force_threshold 判接触)。用"最小持续时间"窗口做边沿去抖 (替代 EMA):
+        #   - 短毛刺 (< edge_hold_time) 采样到的时间量不够长 → 不触发
+        #   - 真实事件延迟 2-3 个控制步 (40-60ms) 触发
+        #   - 窗口上限 edge_window 保证每个事件只触发一次, 无需上一帧状态
+        air_time = contact_sensor.data.current_air_time[:, self._sensor_cfg.body_ids]  # (N, 2)
+        contact_time = contact_sensor.data.current_contact_time[:, self._sensor_cfg.body_ids]  # (N, 2)
+        swing_onset = (air_time > self._edge_hold_time) & (air_time < self._edge_window)  # (N, 2)
+        touchdown = (contact_time > self._edge_hold_time) & (contact_time < self._edge_window)  # (N, 2)
 
         # ---- 2c. Phase-state update --------------------------------------
         # When a foot loses contact it becomes the new swing leg.
@@ -665,9 +668,8 @@ class FootholdReward(ManagerTermBase):
             self._last_W_nom_right = self._channels_right["W_nom"]  # (N, 1, 1)  swing_leg_sign=-1 → -lp
 
         # ---- 4. Reward components (proximity + bezier, weighted internally) ----
-        # ---- 4a. Touchdown / swing-phase detection (shared) ----------------
-        touchdown = in_contact_smooth & (~self._was_in_contact)  # (N, 2)
-        is_swinging = ~in_contact_smooth  # (N, 2)
+        # ---- 4a. Swing-phase level (touchdown edge already computed in 2a) ---
+        is_swinging = ~in_contact  # (N, 2) 电平: 当前子步是否在空中
 
         # ---- 4b. Swing elapsed timer (always updated; drives bezier tracking window) --
         self._swing_elapsed += env.step_dt * is_swinging.float()  # (N, 2)
@@ -753,12 +755,11 @@ class FootholdReward(ManagerTermBase):
             if self._terrain_mask is not None:
                 reward = reward * self._terrain_mask
 
-        # ---- 4e. Persist filtered contact for next frame -----------------
-        self._was_in_contact = in_contact_smooth
+        # (边沿检测为无状态窗口触发, 无需持久化上一帧接触状态)
 
         # ---- 4e. Cache frame data for _debug_vis_callback -----------------
         self._last_body_pos = foot_center.clone()
-        self._last_contact = in_contact_smooth.clone()
+        self._last_contact = in_contact.clone()
         self._last_touchdown = touchdown.clone()
         self._last_swing_onset = swing_onset.clone()
 
@@ -824,7 +825,7 @@ class FootholdReward(ManagerTermBase):
             # the swinging foot (left-swing  → channels_left,  right-swing → channels_right).
             # The visualiser's update() already skips envs where both feet are
             # in contact, so we pass in_contact along.
-            in_contact = self._was_in_contact  # (N, 2) bool
+            in_contact = self._last_contact  # (N, 2) bool — 最近一帧电平缓存
 
             # Build a merged channels dict: pick left or right data per-environment.
             merged: dict[str, torch.Tensor] = {}
@@ -1112,14 +1113,12 @@ class FootholdReward(ManagerTermBase):
             env_ids = slice(None)
         self._p_star_cache[env_ids] = 0.0
         self._p_star_initialized[env_ids] = False
-        self._was_in_contact[env_ids] = True
         # Phase-state reset: default to left-swing; randomise for symmetry.
         if isinstance(env_ids, slice):
             n = self._phase_left_swing.shape[0]
         else:
             n = env_ids.numel()
         self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
-        self._contact_filtered[env_ids] = 1.0
         self._swing_planned[env_ids] = False
         self._swing_elapsed[env_ids] = 0.0
         self._lift_off_pos[env_ids] = 0.0

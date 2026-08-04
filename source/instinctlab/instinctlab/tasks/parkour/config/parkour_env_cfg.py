@@ -807,6 +807,10 @@ class G1Rewards:
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "ankle_offset": 0.035,
+            # 接触边沿去抖 (替代 EMA): 连续离地/接触 ≥ edge_hold_time 才触发事件,
+            #   且 < edge_window 保证单次触发 (延迟 2-3 控制步, 免疫 <25ms 毛刺)
+            "edge_hold_time": 0.025,
+            "edge_window": 0.05,
             "debug_vis": False,
             "terrain_names": [
                 "pyramid_stairs",
