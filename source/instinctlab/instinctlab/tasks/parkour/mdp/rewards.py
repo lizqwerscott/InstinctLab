@@ -675,9 +675,13 @@ class FootholdReward(ManagerTermBase):
         self._swing_elapsed += env.step_dt * is_swinging.float()  # (N, 2)
 
         reward = torch.zeros(env.num_envs, device=env.device)
+        # touchdown 门控 (与 td_mask 同源): 仅当该脚确有摆动计划时才视为真实触地事件。
+        # 排除 reset 后传感器时间量重新累积产生的假触地 (reset 时 swing_planned 已清零)。
+        # 注意: 必须在循环前计算, 循环内 4c-iii 会清除 swing_planned。
+        touchdown_active = touchdown & self._swing_planned  # (N, 2)
         for foot_idx in range(2):
             # Shared swing-phase masks (both components vote on the same swing)
-            td_mask = touchdown[:, foot_idx] & self._swing_planned[:, foot_idx]  # (N,)
+            td_mask = touchdown_active[:, foot_idx]  # (N,)
 
             # ---- 4c-i. Dense reward: Bézier per-frame tracking --------------------
             # --- Tracking reward for currently-swinging feet ----------
@@ -760,16 +764,16 @@ class FootholdReward(ManagerTermBase):
         # ---- 4e. Cache frame data for _debug_vis_callback -----------------
         self._last_body_pos = foot_center.clone()
         self._last_contact = in_contact.clone()
-        self._last_touchdown = touchdown.clone()
+        self._last_touchdown = touchdown_active.clone()
         self._last_swing_onset = swing_onset.clone()
 
         # ---- Event flash timer update ------------------------------------
         if self._debug_vis and hasattr(self, "_event_timer"):
             # Reset timers on new events (flash duration in frames)
             self._event_timer[swing_onset[:, 0], 0] = 10  # left  foot swing onset
-            self._event_timer[touchdown[:, 0], 1] = 15  # left  foot touchdown
+            self._event_timer[touchdown_active[:, 0], 1] = 15  # left  foot touchdown
             self._event_timer[swing_onset[:, 1], 2] = 10  # right foot swing onset
-            self._event_timer[touchdown[:, 1], 3] = 15  # right foot touchdown
+            self._event_timer[touchdown_active[:, 1], 3] = 15  # right foot touchdown
             # Decrement active timers (clamped to zero)
             self._event_timer = (self._event_timer - 1).clamp(min=0)
 
