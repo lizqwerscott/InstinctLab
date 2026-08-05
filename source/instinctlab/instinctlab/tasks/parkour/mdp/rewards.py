@@ -240,19 +240,19 @@ class FootholdBezierReward(ManagerTermBase):
         # avoid rendering spheres at the world origin (0,0,0).
         self._p_star_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
         self._p_star_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        # Previous-frame filtered contact state (used for rising-edge detection).
-        # Initialised all-True so the first swing_onset is reliable.
-        self._was_in_contact = torch.ones(env.num_envs, 2, dtype=torch.bool, device=env.device)
-
         # ---- Phase-state machine for swing-leg tracking -------------------
         # True  = left  leg is the swing leg (right leg is stance)
         # False = right leg is the swing leg (left  leg is stance)
         # Initialised to left-swing by default; reset() can randomise.
         self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
 
-        # Exponential-moving-average filter for raw contact signals.
-        # Smoothing prevents spurious phase switches from force noise.
-        self._contact_filtered = torch.ones(env.num_envs, 2, dtype=torch.float32, device=env.device)
+        # ---- Contact edge detection: window gating (replaces EMA) ----
+        # Uses the sensor's internally accumulated air_time / contact_time
+        # (reset to 0 on state change). Events fire when accumulated time
+        # crosses edge_hold_time but stays below edge_window, guaranteeing
+        # single-shot triggering per transition with ~25 ms latency.
+        self._edge_hold_time = cfg.params.get("edge_hold_time", 0.025)
+        self._edge_window = cfg.params.get("edge_window", 0.05)
 
         # Flag per foot indicating p_star_cache was set by a real plan (not lazy-init).
         # Set True at swing onset, reset False when swing phase ends.
@@ -500,18 +500,19 @@ class FootholdBezierReward(ManagerTermBase):
         contact_norm = torch.norm(
             net_force[:, -1, self._sensor_cfg.body_ids], dim=-1       # (N, 2)
         )
-        in_contact = contact_norm > 1.0                               # (N, 2) raw
 
-        # ---- 2a. Contact-signal EMA filter (avoids oscillation) ----------
-        contact_alpha = 0.85
-        self._contact_filtered = (
-            contact_alpha * self._contact_filtered
-            + (1.0 - contact_alpha) * in_contact.float()
-        )
-        in_contact_smooth = self._contact_filtered > 0.3              # (N, 2)
-
-        # ---- 2b. Swing-onset detection (rising edge on filtered signal) ---
-        swing_onset = (~in_contact_smooth) & self._was_in_contact      # (N, 2)
+        # ---- 2a. Contact edge detection: window gating ----------------
+        # Uses the sensor's internally accumulated air / contact times
+        # (reset to 0 on each state transition).  An event fires once
+        # when the accumulated time crosses edge_hold_time but remains
+        # below edge_window — single-shot, ~25 ms latency, immune to
+        # sub-25 ms glitches.  No per-frame state required.
+        air_time = contact_sensor.data.current_air_time[:, self._sensor_cfg.body_ids]          # (N, 2)
+        contact_time = contact_sensor.data.current_contact_time[:, self._sensor_cfg.body_ids]  # (N, 2)
+        swing_onset = (air_time > self._edge_hold_time) & (air_time < self._edge_window)       # (N, 2)
+        touchdown = (contact_time > self._edge_hold_time) & (contact_time < self._edge_window) # (N, 2)
+        # Current contact state (for downstream consumers: is_swinging, vis).
+        in_contact_state = contact_time > 0.0  # (N, 2)
 
         # ---- 2c. Phase-state update --------------------------------------
         # When a foot loses contact it becomes the new swing leg.
@@ -636,20 +637,33 @@ class FootholdBezierReward(ManagerTermBase):
         # ---- 4. Continuous Bézier swing tracking reward (per-frame) -------
 
         # ---- 4a. Increment swing elapsed timer for swinging feet -----------
-        is_swinging = ~in_contact_smooth                                   # (N, 2)
+        is_swinging = ~in_contact_state                                     # (N, 2)
         self._swing_elapsed += env.step_dt * is_swinging.float()           # (N, 2)
-
-        # ---- 4b. Touchdown detection (for debug vis / swing_planned cleanup) -
-        touchdown = in_contact_smooth & (~self._was_in_contact)            # (N, 2)
 
         # ---- 4c. Per-frame Bézier tracking reward --------------------------
         reward = torch.zeros(env.num_envs, device=env.device)
+        # Gate touchdown by swing_planned before the reward loop.
+        # After env-reset the sensor accumulated times are zeroed and
+        # re-accumulate, so a foot already in contact re-enters the
+        # touchdown window ~25-50 ms later. The reward path is already
+        # safe (td_mask requires swing_planned), but debug consumers
+        # (_last_touchdown, event timers) would still see the spurious
+        # event.  Computing touchdown_active here (before the loop's
+        # 4c-iii cleanup clears swing_planned) fixes both paths.
+        touchdown_active = touchdown & self._swing_planned  # (N, 2)
         for foot_idx in range(2):
             # Only compute reward for feet that are swinging AND have a plan
             mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
             if mask.any():
-                # Swing progress u ∈ [0, 1]
-                u = (self._swing_elapsed[mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)  # (M,)
+                # Swing progress with quintic smoothstep time-warping.
+                # Linear time ratio u_time = t / T_swing ∈ [0, 1].
+                # Warped Bézier parameter u = f(u_time) where f is
+                # f(x) = 6x⁵ − 15x⁴ + 10x³  (5th-order smoothstep).
+                # Properties: f(0)=0, f(1)=1, f'(0)=f'(1)=0, f''(0)=f''(1)=0.
+                # This guarantees zero endpoint velocity / acceleration so
+                # the reference is stationary at lift-off and touch-down.
+                u_time = (self._swing_elapsed[mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)  # (M,)
+                u = u_time**3 * (10.0 - 15.0 * u_time + 6.0 * u_time**2)  # (M,) quintic smoothstep
                 u_unsq = u.unsqueeze(-1)  # (M, 1) for broadcasting with positions
 
                 P0 = self._lift_off_pos[mask, foot_idx]     # (M, 3) lift-off
@@ -703,7 +717,7 @@ class FootholdBezierReward(ManagerTermBase):
                 reward[mask] += foot_reward
 
                 # Clean up swing_planned at touchdown
-                td_mask = touchdown[:, foot_idx][mask]  # (M,) subset of mask
+                td_mask = touchdown_active[:, foot_idx][mask]  # (M,) subset of mask
                 if td_mask.any():
                     # Map td_mask back to full env_ids via mask indices
                     mask_indices = mask.nonzero(as_tuple=True)[0]
@@ -721,21 +735,18 @@ class FootholdBezierReward(ManagerTermBase):
             if self._terrain_mask is not None:
                 reward = reward * self._terrain_mask
 
-        # ---- 4f. Persist filtered contact for next frame -----------------
-        self._was_in_contact = in_contact_smooth
-
-        # ---- 4g. Cache frame data for _debug_vis_callback -----------------
+        # ---- 4f. Cache frame data for _debug_vis_callback -----------------
         self._last_body_pos = foot_center.clone()
-        self._last_contact = in_contact_smooth.clone()
-        self._last_touchdown = touchdown.clone()
+        self._last_contact = in_contact_state.clone()
+        self._last_touchdown = touchdown_active.clone()
         self._last_swing_onset = swing_onset.clone()
 
         # ---- Event flash timer update ------------------------------------
         if self._debug_vis and hasattr(self, '_event_timer'):
-            self._event_timer[swing_onset[:, 0], 0] = 10   # left  foot swing onset
-            self._event_timer[touchdown[:, 0], 1] = 15     # left  foot touchdown
-            self._event_timer[swing_onset[:, 1], 2] = 10   # right foot swing onset
-            self._event_timer[touchdown[:, 1], 3] = 15     # right foot touchdown
+            self._event_timer[swing_onset[:, 0], 0] = 10         # left  foot swing onset
+            self._event_timer[touchdown_active[:, 0], 1] = 15    # left  foot touchdown
+            self._event_timer[swing_onset[:, 1], 2] = 10         # right foot swing onset
+            self._event_timer[touchdown_active[:, 1], 3] = 15    # right foot touchdown
             self._event_timer = (self._event_timer - 1).clamp(min=0)
 
         return reward  # (N,)
@@ -788,7 +799,7 @@ class FootholdBezierReward(ManagerTermBase):
             # the swinging foot (left-swing  → channels_left,  right-swing → channels_right).
             # The visualiser's update() already skips envs where both feet are
             # in contact, so we pass in_contact along.
-            in_contact = self._was_in_contact  # (N, 2) bool
+            in_contact = self._last_contact  # (N, 2) bool
 
             # Build a merged channels dict: pick left or right data per-environment.
             merged: dict[str, torch.Tensor] = {}
@@ -1065,14 +1076,12 @@ class FootholdBezierReward(ManagerTermBase):
             env_ids = slice(None)
         self._p_star_cache[env_ids] = 0.0
         self._p_star_initialized[env_ids] = False
-        self._was_in_contact[env_ids] = True
         # Phase-state reset: default to left-swing; randomise for symmetry.
         if isinstance(env_ids, slice):
             n = self._phase_left_swing.shape[0]
         else:
             n = env_ids.numel()
         self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
-        self._contact_filtered[env_ids] = 1.0
         self._swing_planned[env_ids] = False
         self._swing_elapsed[env_ids] = 0.0
         self._lift_off_pos[env_ids] = 0.0
