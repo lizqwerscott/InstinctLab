@@ -774,6 +774,10 @@ class G1Rewards:
     #     proximity_weight=0.0, bezier_weight=1.0 → 仅 Bézier 连续摆腿跟踪
     #     proximity_weight=1.0, bezier_weight=1.0 → 两者叠加 (默认)
     # 两个分量共享同一 DCM 规划器/相位机/落点缓存 (单实例, 无重复计算)。
+    # 主动式步态引导 (anti-hop): 相位机不再被动标记实际抬脚, 而是主动调度
+    # "轮到"的脚 → 只有轮到且另一只脚着地时抬脚才有效 (拿计划+奖励), 有效后
+    # 强制 L→R→L→R 交替; 违规抬脚/双足离地 (跳着走) 会被惩罚 → 从蹦跳步态
+    # 引导到单腿迈步步态。课程 foothold_weight ramp 时整项 (含引导惩罚) 一起 ramp。
     foothold = RewTerm(
         func=mdp.FootholdReward,
         weight=10.0,  # 总奖励权重 (课程 foothold_weight 会 ramp 这个值)
@@ -781,6 +785,21 @@ class G1Rewards:
             # 内部状态权重
             "proximity_weight": 1.0,
             "bezier_weight": 1.0,
+            # 主动式步态引导 (anti-hop) 权重:
+            #   anti_hop_weight   双足同时离地 (跳着走) 每帧惩罚
+            #   wrong_foot_weight 违规抬脚 (没轮到 / 另一只脚还在空中) 事件惩罚
+            #   swing_onset_weight 轮到的那只脚正确抬脚 → 小奖励 (引导迈步)
+            #   com_bounce_weight 移动时 CoM 垂直振荡 |v_z| 每帧惩罚 (弹跳根源)
+            #   k_penalty_gate    前方高度图坡度 ≥ 该值 (大台阶) 时关闭上述
+            #                     惩罚, 允许蹬跳上台阶 (默认 0.25 ≈ 0.11m 台阶)
+            # 以上纪律族权重由课程 foothold_weight_schedule 按"群体移动量"
+            # ramp (预防性, 蹦跳一出现就压制); proximity/bezier 精度族按速度
+            # 跟踪 EMA ramp (纠错性, ~8k 后才要求精确落点)。
+            "anti_hop_weight": 1.0,
+            "wrong_foot_weight": 1.0,
+            "swing_onset_weight": 0.3,
+            "com_bounce_weight": 0.5,
+            "k_penalty_gate": 0.25,
             # DCM 规划器落点搜索范围 (沿 x 轴, 前后对称可配)
             #   前方 max_fwd_range 合理区间: [0.4, 0.75]
             #     0.4 = 仅够 0.8 m/s 步态, 无裕量; 0.6 = 覆盖 1.0 m/s 大步 + 上坡/楼梯裕量
@@ -1005,10 +1024,18 @@ class CurriculumCfg:
         func=mdp.foothold_weight_schedule,
         params={
             "reward_term_name": "foothold",
+            # 双因子课程:
+            #   - 外部 weight + 纪律族内部权重 (anti_hop/wrong_foot/com_bounce/
+            #     swing_onset) 随"群体移动量" ramp: 机器人一开始移动 (≈2-4k,
+            #     蹦跳刚出现) 引导就生效, 不让蹦跳扎根;
+            #   - 精度族内部权重 (proximity/bezier) 随速度跟踪 EMA ramp:
+            #     跟踪好了 (~8k+) 才要求精确落点。
             "start_weight": 0.0,
             "end_weight": 20.0,
             "vel_tracking_threshold": 0.5,
             "vel_tracking_target": 0.6,
+            "movement_start": 0.15,
+            "movement_end": 0.5,
         },
     )
 

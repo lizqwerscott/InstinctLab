@@ -218,10 +218,24 @@ class FootholdReward(ManagerTermBase):
     The two components share one DCM planner, one phase-state machine and one
     foothold-target cache (single per-frame pipeline). No touchdown/over-time
     penalties are applied.
+
+    Active gait scheduling (anti-hop): the phase-state machine does not
+    passively label whichever foot lifts — it actively schedules which foot
+    may swing. A swing onset is *valid* only when the scheduled foot lifts
+    while the other foot is still in contact; valid onsets flip the schedule
+    (forced L→R→L→R alternation) and are the only onsets that receive a
+    foothold plan/reward. Invalid onsets (wrong foot, or lift-off during
+    double flight) get no plan and incur ``wrong_foot_weight``; per-frame
+    double flight (both feet airborne — hopping) is penalized by
+    ``anti_hop_weight``; a valid onset earns a small ``swing_onset_weight``
+    bonus that actively rewards initiating the step. Both penalties are
+    disabled when the terrain slope ahead (heightmap-derived ``k``) exceeds
+    ``k_penalty_gate``, so jumping big stairs remains allowed.
     """
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv"):
         super().__init__(cfg, env)
+        self.device = env.device
         self._asset_cfg = cfg.params["asset_cfg"]
         self._sensor_cfg = cfg.params["sensor_cfg"]
         self._heightmap_sensor_cfg = cfg.params["heightmap_sensor_cfg"]
@@ -257,6 +271,14 @@ class FootholdReward(ManagerTermBase):
         self._proximity_weight = cfg.params.get("proximity_weight", 1.0)
         self._bezier_weight = cfg.params.get("bezier_weight", 1.0)
 
+        # ---- 主动式步态引导 (anti-hop / 相位强制交替) 权重 ----
+        self._anti_hop_weight = cfg.params.get("anti_hop_weight", 1.0)
+        self._wrong_foot_weight = cfg.params.get("wrong_foot_weight", 1.0)
+        self._swing_onset_weight = cfg.params.get("swing_onset_weight", 0.3)
+        self._k_penalty_gate = cfg.params.get("k_penalty_gate", 0.25)
+        # CoM 垂直振荡惩罚 (移动时 |v_z| 每帧惩罚, 压制弹跳步态)
+        self._com_bounce_weight = cfg.params.get("com_bounce_weight", 0.5)
+
         # Planner
         self._planner = DCMFootholdPlanner(
             num_envs=env.num_envs,
@@ -273,7 +295,11 @@ class FootholdReward(ManagerTermBase):
         # True  = left  leg is the swing leg (right leg is stance)
         # False = right leg is the swing leg (left  leg is stance)
         # Initialised to left-swing by default; reset() can randomise.
-        self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+        # 主动式语义: 下一次"轮到"迈步的脚 = ~phase; 只有轮到且另一只脚
+        # 着地时抬脚才算有效摆动 (见 __call__ 2c 段), 有效摆动后强制翻转交替。
+        self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=self.device)
+        # 本 episode 相位是否已与首次抬脚同步 (开局宽限用, 见 2c 段)
+        self._phase_synced = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
 
         # ---- Contact edge detection (window gating, replaces EMA) --------
         # 边沿去抖参数 (秒): 连续离地/接触 ≥ edge_hold_time 才视为真实事件,
@@ -386,6 +412,10 @@ class FootholdReward(ManagerTermBase):
                         radius=0.06,
                         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 1.0)),
                     ),
+                    "wrong": sim_utils.SphereCfg(
+                        radius=0.06,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 1.0)),
+                    ),
                 },
             )
             self._event_vis = VisualizationMarkers(event_vis_cfg)
@@ -418,8 +448,8 @@ class FootholdReward(ManagerTermBase):
             self._h_line_vis = VisualizationMarkers(h_line_cfg)
             self._h_line_vis.set_visibility(True)
 
-            # --- Event flash timer (4 columns: [L_swing, L_td, R_swing, R_td]) ---
-            self._event_timer = torch.zeros(env.num_envs, 4, dtype=torch.int, device=env.device)
+            # --- Event flash timer (6 columns: [L_swing, L_td, R_swing, R_td, L_wrong, R_wrong]) ---
+            self._event_timer = torch.zeros(env.num_envs, 6, dtype=torch.int, device=env.device)
 
         # --- Cached frame data for _debug_vis_callback (always allocated) ---
         self._last_body_pos = torch.zeros(env.num_envs, 2, 3, device=env.device)
@@ -486,15 +516,25 @@ class FootholdReward(ManagerTermBase):
         edge_hold_time: float | None = None,
         edge_window: float | None = None,
         terrain_names: list[str] | None = None,
+        anti_hop_weight: float | None = None,
+        wrong_foot_weight: float | None = None,
+        swing_onset_weight: float | None = None,
+        k_penalty_gate: float | None = None,
+        com_bounce_weight: float | None = None,
     ) -> torch.Tensor:
         """Compute the combined foothold reward.
 
         The signature mirrors the config ``params`` keys: Isaac Lab's
         ``_resolve_common_term_cfg`` requires every config param to appear as
         a (defaulted) argument of ``__call__`` or it raises ValueError at
-        startup. All values except ``sigma_p`` are resolved in ``__init__``
-        from ``cfg.params`` and are intentionally unused here; ``sigma_p`` is
-        read directly from the call argument.
+        startup. Most values are resolved in ``__init__`` from ``cfg.params``
+        and are intentionally unused here; ``sigma_p`` is read directly from
+        the call argument. The internal weights (``proximity_weight``,
+        ``bezier_weight``, ``anti_hop_weight``, ``wrong_foot_weight``,
+        ``swing_onset_weight``, ``com_bounce_weight``, ``k_penalty_gate``)
+        ARE read from the call arguments each frame so that the curriculum
+        (``foothold_weight_schedule``) can ramp them at runtime by mutating
+        ``term_cfg.params``; ``None`` falls back to the ``__init__`` default.
         """
         asset = env.scene[self._asset_cfg.name]
 
@@ -525,13 +565,36 @@ class FootholdReward(ManagerTermBase):
         swing_onset = (air_time > self._edge_hold_time) & (air_time < self._edge_window)  # (N, 2)
         touchdown = (contact_time > self._edge_hold_time) & (contact_time < self._edge_window)  # (N, 2)
 
-        # ---- 2c. Phase-state update --------------------------------------
-        # When a foot loses contact it becomes the new swing leg.
-        #   swing_onset[:, 0] == True  → left foot just lifted  → phase_left=True
-        #   swing_onset[:, 1] == True  → right foot just lifted → phase_left=False
-        envs_to_swap = swing_onset[:, 0] | swing_onset[:, 1]
-        new_phase = swing_onset[:, 0]  # True if left onset, False if right onset
-        self._phase_left_swing = torch.where(envs_to_swap, new_phase, self._phase_left_swing)
+        # ---- 2c. Phase-state update (主动式相序: 强制左右交替) ------------
+        # _phase_left_swing = 当前(或最近一次)摆动脚。下一次"轮到"的脚 = ~phase。
+        # 一个 swing_onset 只有同时满足以下条件才算 *有效摆动*:
+        #   1) 轮到该脚 (valid_left 需 phase_left=False, valid_right 需 phase_left=True);
+        #   2) 另一只脚当前着地 (禁止双足同时离地 → 跳着走无法拿到双份奖励)。
+        # 有效摆动 → 翻转相序 (L→R→L→R 交替), 且是唯一获得摆动计划/奖励的 onset;
+        # 无效 onset (违规脚, 或另一只脚还在空中时抬脚) → 不授予计划, 施以
+        # wrong_foot 惩罚 (见 4c-iv)。
+        phase_left = self._phase_left_swing
+        # 开局宽限 (grace): 本 episode 尚未同步相位、且只有一只脚抬脚 →
+        # 自动以该脚为摆动脚并视为有效摆动。消除随机初始相位在 t=0 造成的
+        # 不可学习噪声: 策略首帧看不到相位, 50% 概率罚它"没轮到"毫无意义。
+        # 注意: 首次事件若是双抬 (蹦跳), 不授予宽限也不锁存 synced —— 相位仍
+        # 保持随机但宽限保持开放, 直到出现单脚抬脚才同步, 残留噪声为零。
+        first_onset = swing_onset[:, 0] | swing_onset[:, 1]
+        grace = ~self._phase_synced & first_onset & ~(swing_onset[:, 0] & swing_onset[:, 1])
+        if grace.any():
+            phase_left = torch.where(grace, swing_onset[:, 0], phase_left)
+        valid_left = (swing_onset[:, 0] & ~phase_left & in_contact[:, 1]) | (grace & swing_onset[:, 0])
+        valid_right = (swing_onset[:, 1] & phase_left & in_contact[:, 0]) | (grace & swing_onset[:, 1])
+        wrong_left = swing_onset[:, 0] & ~valid_left
+        wrong_right = swing_onset[:, 1] & ~valid_right
+        valid_onset = valid_left | valid_right
+        wrong_onset = wrong_left | wrong_right
+        self._phase_left_swing = torch.where(
+            valid_left,
+            torch.ones_like(phase_left),
+            torch.where(valid_right, torch.zeros_like(phase_left), phase_left),
+        )
+        self._phase_synced = self._phase_synced | grace
 
         # ---- 3. Common quantities (shared by planning & reward) ----------
         root_pos = asset.data.root_pos_w  # (N, 3)
@@ -570,7 +633,8 @@ class FootholdReward(ManagerTermBase):
         # Left foot swing onset  → plan left-foot target (stance = right foot, sign = +1)
         # Right foot swing onset → plan right-foot target (stance = left foot, sign = -1)
         for foot_idx in range(2):
-            mask = swing_onset[:, foot_idx]
+            # 只对"有效摆动"(轮到且另一只脚着地) 的脚做计划与缓存
+            mask = valid_left if foot_idx == 0 else valid_right
             if mask.any():
                 if foot_idx == 0:  # left foot
                     p_new = self._planner.plan_in_world(
@@ -675,6 +739,15 @@ class FootholdReward(ManagerTermBase):
         self._swing_elapsed += env.step_dt * is_swinging.float()  # (N, 2)
 
         reward = torch.zeros(env.num_envs, device=env.device)
+        # ---- 动态权重解析 (课程逐帧改写 term_cfg.params → 经 kwargs 传入;
+        # None 时回退到 __init__ 默认值) ----
+        proximity_w = self._proximity_weight if proximity_weight is None else proximity_weight
+        bezier_w = self._bezier_weight if bezier_weight is None else bezier_weight
+        anti_hop = self._anti_hop_weight if anti_hop_weight is None else anti_hop_weight
+        wrong_foot = self._wrong_foot_weight if wrong_foot_weight is None else wrong_foot_weight
+        swing_onset_w = self._swing_onset_weight if swing_onset_weight is None else swing_onset_weight
+        com_bounce = self._com_bounce_weight if com_bounce_weight is None else com_bounce_weight
+        k_gate = self._k_penalty_gate if k_penalty_gate is None else k_penalty_gate
         # touchdown 门控 (与 td_mask 同源): 仅当该脚确有摆动计划时才视为真实触地事件。
         # 排除 reset 后传感器时间量重新累积产生的假触地 (reset 时 swing_planned 已清零)。
         # 注意: 必须在循环前计算, 循环内 4c-iii 会清除 swing_planned。
@@ -735,18 +808,36 @@ class FootholdReward(ManagerTermBase):
                 # regardless of tracking quality → must actually advance the
                 # swing to earn meaningful reward.
                 tracking_quality = torch.exp(-sigma_p * pos_err_sq - self._sigma_d * ori_err_sq)
-                reward[tracking_mask] += self._bezier_weight * u * tracking_quality
+                reward[tracking_mask] += bezier_w * u * tracking_quality
 
             # ---- 4c-ii. Sparse reward: one-shot proximity at touchdown ----------
-            if self._proximity_weight > 0.0 and td_mask.any():
+            if proximity_w > 0.0 and td_mask.any():
                 dist = foot_center[td_mask, foot_idx] - self._p_star_cache[td_mask, foot_idx]  # (M, 3)
                 dist_sq = (dist**2).sum(dim=-1)  # (M,)
                 foot_reward = torch.exp(-sigma_p * dist_sq)  # (M,)
-                reward[td_mask] += self._proximity_weight * foot_reward
+                reward[td_mask] += proximity_w * foot_reward
 
             # ---- 4c-iii. Clear swing flags on touchdown (phase machine cleanup) ---
             if td_mask.any():
                 self._swing_planned[td_mask, foot_idx] = False
+
+        # ---- 4c-iv. 主动式步态引导: 惩罚跳着走, 奖励按序迈步 ----------
+        # 双足同时离地 (跳着走) → 每帧惩罚 (anti_hop), 直接压低蹦跳步态;
+        # 违规抬脚 (没轮到 / 另一只脚还在空中) → 事件惩罚 (wrong_foot);
+        # 移动中的 CoM 垂直振荡 → 每帧惩罚 (com_bounce, 弹跳步态的根源)。
+        #   仅在"实际水平移动 + 至少一只脚着地"时生效: 站定晃动/摔倒不扣。
+        # 前方坡度 ≥ k_penalty_gate 时 (如大台阶) 关闭这些惩罚, 允许蹬跳。
+        double_flight = ~in_contact[:, 0] & ~in_contact[:, 1]  # (N,)
+        penalty_scale = (k < k_gate).float()  # (N,) 陡坡关断
+        bounce_gate = (torch.norm(asset.data.root_lin_vel_w[:, :2], dim=1) > 0.05) & (
+            in_contact[:, 0] | in_contact[:, 1]
+        )
+        reward -= wrong_foot * wrong_onset.float() * penalty_scale
+        reward -= anti_hop * double_flight.float() * penalty_scale
+        reward -= com_bounce * asset.data.root_lin_vel_w[:, 2].abs() * penalty_scale * bounce_gate.float()
+        # 主动迈步奖励: 轮到的脚正确抬脚 → 小奖励 (弥补 Bezier u≈0 处无梯度,
+        # 主动引导"启动迈步"这一动作本身)
+        reward += swing_onset_w * valid_onset.float()
 
         # ---- 4c. Velocity-condition gate -----------------------------------
         vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
@@ -770,10 +861,12 @@ class FootholdReward(ManagerTermBase):
         # ---- Event flash timer update ------------------------------------
         if self._debug_vis and hasattr(self, "_event_timer"):
             # Reset timers on new events (flash duration in frames)
-            self._event_timer[swing_onset[:, 0], 0] = 10  # left  foot swing onset
+            self._event_timer[valid_left, 0] = 10  # left  foot valid swing onset
             self._event_timer[touchdown_active[:, 0], 1] = 15  # left  foot touchdown
-            self._event_timer[swing_onset[:, 1], 2] = 10  # right foot swing onset
+            self._event_timer[valid_right, 2] = 10  # right foot valid swing onset
             self._event_timer[touchdown_active[:, 1], 3] = 15  # right foot touchdown
+            self._event_timer[wrong_left, 4] = 10  # left  foot invalid (wrong) onset
+            self._event_timer[wrong_right, 5] = 10  # right foot invalid (wrong) onset
             # Decrement active timers (clamped to zero)
             self._event_timer = (self._event_timer - 1).clamp(min=0)
 
@@ -943,6 +1036,14 @@ class FootholdReward(ManagerTermBase):
                     if td_active.any():
                         event_positions.append(body_pos[td_active, foot_idx])
                         event_indices.append(torch.ones(td_active.sum(), dtype=torch.int, device=td_timer.device))
+                    # Invalid (wrong) onset timer columns: 4 for left, 5 for right
+                    wrong_timer = event_timer[:, 4 + foot_idx]
+                    wrong_active = wrong_timer > 0
+                    if wrong_active.any():
+                        event_positions.append(body_pos[wrong_active, foot_idx])
+                        event_indices.append(
+                            torch.full((wrong_active.sum(),), 2, dtype=torch.int, device=wrong_timer.device)
+                        )
                 if event_positions:
                     all_pos = torch.cat(event_positions, dim=0)
                     all_idx = torch.cat(event_indices, dim=0)
@@ -1123,6 +1224,7 @@ class FootholdReward(ManagerTermBase):
         else:
             n = env_ids.numel()
         self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
+        self._phase_synced[env_ids] = False
         self._swing_planned[env_ids] = False
         self._swing_elapsed[env_ids] = 0.0
         self._lift_off_pos[env_ids] = 0.0

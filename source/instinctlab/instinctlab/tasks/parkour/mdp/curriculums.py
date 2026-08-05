@@ -54,18 +54,32 @@ def tracking_exp_vel(
 
 
 class foothold_weight_schedule(ManagerTermBase):
-    """Curriculum that gates the combined foothold reward's total weight
-    (RewTerm.weight) behind velocity tracking performance.
+    """Two-factor gait curriculum for the combined foothold reward.
 
-    The weight linearly ramps from ``start_weight`` to ``end_weight``
-    based on the population's average instantaneous velocity tracking
-    score, smoothed by an EMA that persists across episode boundaries.
-    When tracking is poor the weight stays low, giving the robot time
-    to learn a basic gait before being pressured for precise foothold
-    placement.
+    Two independent ramps, matching the observed training timeline
+    (stand 0~2k → hop 2k~8k → alternating gait 8k+):
 
-    The default ``end_weight=None`` picks up whatever weight is set in
-    the reward config, so the curriculum stays in sync.
+    - ``movement_factor``: population mean of (achieved horizontal speed /
+      commanded speed), EMA-free instantaneous mean. It ramps the external
+      ``RewTerm.weight`` AND the gait-discipline internal weights
+      (``anti_hop_weight``, ``wrong_foot_weight``, ``com_bounce_weight``,
+      ``swing_onset_weight``). Because hopping satisfies velocity tracking,
+      gating discipline behind tracking quality would only turn on the
+      anti-hop guidance once hopping is already entrenched (~8k). Keying it
+      on *movement* instead activates the guidance as soon as the robot
+      starts moving (~2-4k) — hopping is caught while it is still young
+      (preventive), and the penalty strength scales with how much the robot
+      actually moves, so a robot that cannot walk yet is not penalized
+      (no deadlock).
+
+    - ``vel_factor``: velocity-tracking EMA (as before). It ramps the
+      precision internal weights (``proximity_weight``, ``bezier_weight``)
+      so precise foothold placement is only demanded once the robot tracks
+      velocity well (corrective, ~8k+).
+
+    The curriculum mutates ``term_cfg.params`` directly; the reward manager
+    re-reads them on every frame (``term_cfg.func(env, **term_cfg.params)``),
+    so the changes take effect immediately.
     """
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
@@ -75,6 +89,7 @@ class foothold_weight_schedule(ManagerTermBase):
         self._term_cfg = None
         self._initial_weight = None
         self._vel_tracking_ema = 0.0
+        self._base_internal: dict[str, float] = {}
 
     def __call__(
         self,
@@ -86,37 +101,57 @@ class foothold_weight_schedule(ManagerTermBase):
         vel_tracking_threshold: float = 0.3,
         vel_tracking_target: float = 0.8,
         vel_ema_alpha: float = 0.005,
+        movement_start: float = 0.15,
+        movement_end: float = 0.5,
     ) -> dict:
         if self._term_cfg is None:
             try:
                 self._term_cfg = env.reward_manager.get_term_cfg(self._reward_term_name)
                 self._initial_weight = self._term_cfg.weight
+                p = self._term_cfg.params
+                # 快照配置里的基础内部权重, 课程在此基础上乘 ramp 因子
+                self._base_internal = {
+                    "anti_hop_weight": p.get("anti_hop_weight", 1.0),
+                    "wrong_foot_weight": p.get("wrong_foot_weight", 1.0),
+                    "com_bounce_weight": p.get("com_bounce_weight", 0.5),
+                    "swing_onset_weight": p.get("swing_onset_weight", 0.3),
+                    "proximity_weight": p.get("proximity_weight", 1.0),
+                    "bezier_weight": p.get("bezier_weight", 1.0),
+                }
             except ValueError:
                 pass
 
-        if self._term_cfg is None:
+        if self._term_cfg is None or not self._base_internal:
             return {
                 "weight": start_weight,
                 "vel_factor": 1.0,
                 "vel_tracking_ema": self._vel_tracking_ema,
                 "instant_tracking": 0.0,
+                "movement": 0.0,
+                "movement_factor": 0.0,
             }
 
         if end_weight is None:
             end_weight = self._initial_weight
 
-        # Velocity-tracking gate: scale the weight by the population's
-        # instantaneous tracking quality (EMA-smoothed across episodes).
         try:
             command = env.command_manager.get_term(self._command_name)
             robot = command.robot
-            lin_vel_error = torch.sum(
-                torch.square(command.vel_command_b[:, :2] - robot.data.root_lin_vel_b[:, :2]),
-                dim=1,
-            )
-            instant_tracking = torch.exp(-lin_vel_error / (command.cfg.lin_vel_metrics_std**2)).mean().item()
         except (ValueError, KeyError, AttributeError):
-            instant_tracking = 0.0
+            command = None
+            robot = None
+
+        # ---- Factor 2: velocity-tracking EMA (precision ramp) ------------
+        instant_tracking = 0.0
+        if command is not None and robot is not None:
+            try:
+                lin_vel_error = torch.sum(
+                    torch.square(command.vel_command_b[:, :2] - robot.data.root_lin_vel_b[:, :2]),
+                    dim=1,
+                )
+                instant_tracking = torch.exp(-lin_vel_error / (command.cfg.lin_vel_metrics_std**2)).mean().item()
+            except (ValueError, KeyError, AttributeError):
+                instant_tracking = 0.0
 
         self._vel_tracking_ema = vel_ema_alpha * instant_tracking + (1.0 - vel_ema_alpha) * self._vel_tracking_ema
 
@@ -128,11 +163,41 @@ class foothold_weight_schedule(ManagerTermBase):
                 1.0,
             )
 
-        new_weight = start_weight + (end_weight - start_weight) * vel_factor
+        # ---- Factor 1: population movement level (discipline ramp) -------
+        # 实际水平速度 / 指令速度 的群体均值 → 机器人一开始移动引导就生效。
+        movement = 0.0
+        if command is not None and robot is not None:
+            try:
+                v_robot = torch.norm(robot.data.root_lin_vel_b[:, :2], dim=1)
+                v_cmd_norm = torch.norm(command.vel_command_b[:, :2], dim=1)
+                ratio = (v_robot / (v_cmd_norm + 1e-3)).clamp(0.0, 1.0)
+                movement = ratio.mean().item()
+            except (ValueError, KeyError, AttributeError):
+                movement = 0.0
+
+        if movement < movement_start or movement_end <= movement_start:
+            movement_factor = 0.0 if movement < movement_start else 1.0
+        else:
+            movement_factor = min((movement - movement_start) / (movement_end - movement_start), 1.0)
+
+        # ---- Apply: external weight on movement, internal weights split ---
+        new_weight = start_weight + (end_weight - start_weight) * movement_factor
         self._term_cfg.weight = new_weight
+
+        base_w = self._base_internal
+        # 纪律族: 随移动 ramp (预防性, 蹦跳刚出现就压制)
+        discipline_family = ("anti_hop_weight", "wrong_foot_weight", "com_bounce_weight", "swing_onset_weight")
+        for key in discipline_family:
+            self._term_cfg.params[key] = base_w[key] * movement_factor
+        # 精度族: 随速度跟踪 ramp (纠错性, 跟踪好了才要求精确落点)
+        for key in ("proximity_weight", "bezier_weight"):
+            self._term_cfg.params[key] = base_w[key] * vel_factor
+
         return {
             "weight": new_weight,
             "vel_factor": vel_factor,
             "vel_tracking_ema": self._vel_tracking_ema,
             "instant_tracking": instant_tracking,
+            "movement": movement,
+            "movement_factor": movement_factor,
         }
