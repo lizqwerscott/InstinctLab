@@ -235,7 +235,6 @@ class FootholdReward(ManagerTermBase):
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv"):
         super().__init__(cfg, env)
-        self.device = env.device
         self._asset_cfg = cfg.params["asset_cfg"]
         self._sensor_cfg = cfg.params["sensor_cfg"]
         self._heightmap_sensor_cfg = cfg.params["heightmap_sensor_cfg"]
@@ -297,9 +296,9 @@ class FootholdReward(ManagerTermBase):
         # Initialised to left-swing by default; reset() can randomise.
         # 主动式语义: 下一次"轮到"迈步的脚 = ~phase; 只有轮到且另一只脚
         # 着地时抬脚才算有效摆动 (见 __call__ 2c 段), 有效摆动后强制翻转交替。
-        self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=self.device)
+        self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
         # 本 episode 相位是否已与首次抬脚同步 (开局宽限用, 见 2c 段)
-        self._phase_synced = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
+        self._phase_synced = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
         # ---- Contact edge detection (window gating, replaces EMA) --------
         # 边沿去抖参数 (秒): 连续离地/接触 ≥ edge_hold_time 才视为真实事件,
