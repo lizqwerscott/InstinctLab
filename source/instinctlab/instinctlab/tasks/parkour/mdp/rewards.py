@@ -477,6 +477,8 @@ class FootholdBezierReward(ManagerTermBase):
         delta_l_plus: float = None,
         delta_r_minus: float = None,
         delta_r_plus: float = None,
+        edge_hold_time: float = None,
+        edge_window: float = None,
     ) -> torch.Tensor:
         """Compute foothold proximity reward.
 
