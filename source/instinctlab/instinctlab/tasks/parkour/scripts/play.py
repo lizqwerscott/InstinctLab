@@ -188,13 +188,14 @@ def main():
                 get_subobs_size(
                     env.get_obs_segments(),
                     [
-                        "base_lin_vel",
                         "base_ang_vel",
                         "projected_gravity",
                         "velocity_commands",
-                        "joint_pos",
-                        "joint_vel",
-                        "actions",
+                        "gait_frequency",
+                        "gait_phase",
+                        "joint_pos_rel",
+                        "joint_vel_rel",
+                        "last_action",
                     ],
                 ),
             ),

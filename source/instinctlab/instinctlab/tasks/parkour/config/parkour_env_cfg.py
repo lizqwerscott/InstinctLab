@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import os
 from dataclasses import MISSING
@@ -430,6 +432,20 @@ class ObservationsCfg:
             params={"command_name": "base_velocity"},
             noise=None,
         )
+        gait_frequency = ObsTerm(
+            func=mdp.gait_frequency,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
+            noise=None,
+        )
+        gait_phase = ObsTerm(
+            func=mdp.gait_phase,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
+            noise=None,
+        )
         joint_pos_rel = ObsTerm(
             func=mdp.joint_pos_rel,
             noise=Unoise(n_min=-0.01, n_max=0.01),
@@ -473,6 +489,20 @@ class ObservationsCfg:
             history_length=8,
             flatten_history_dim=True,
             params={"command_name": "base_velocity"},
+            noise=None,
+        )
+        gait_frequency = ObsTerm(
+            func=mdp.gait_frequency,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
+            noise=None,
+        )
+        gait_phase = ObsTerm(
+            func=mdp.gait_phase,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
             noise=None,
         )
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=8, flatten_history_dim=True)
@@ -606,6 +636,13 @@ class ActionsCfg:
         joint_names=[".*"],
         scale=beyondmimic_action_scale,
         use_default_offset=True,
+    )
+    gait_frequency = mdp.GaitFrequencyActionCfg(
+        asset_name="robot",
+        frequency_range=(1.0, 1.5),
+        ema_alpha=0.2,
+        initial_frequency=1.0,
+        initial_phase=0.0,
     )
 
 
