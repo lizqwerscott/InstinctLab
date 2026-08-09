@@ -770,6 +770,26 @@ class G1Rewards:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
+    # Paper: second-order action smoothness penalty -w·||a_t - 2a_{t-1} + a_{t-2}||^2, w = 2.5e-3.
+    # Operates on the full raw action vector (joints + gait-frequency).
+    action_smoothness = RewTerm(
+        func=mdp.ActionSmoothnessTerm,
+        weight=-2.5e-3,
+        params={
+            # 前若干步历史从 0 起步, 掩盖初始的虚假平滑度惩罚。
+            "warmup_steps": 10,
+        },
+    )
+    # Paper: penalty -w·n_lim on the number of raw action dims beyond [-1, 1], w = 0.25.
+    # Acts on the raw policy output (pre action-term clipping), so it still fires
+    # on an out-of-range gait-frequency primitive that gets clipped to [0.7, 1.3].
+    action_limit = RewTerm(
+        func=mdp.action_limit,
+        weight=-0.25,
+        params={
+            "limit": 1.0,
+        },
+    )
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
     pelvis_orientation_l2 = RewTerm(
         func=mdp.link_orientation,

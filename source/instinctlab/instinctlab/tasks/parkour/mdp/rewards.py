@@ -1189,3 +1189,84 @@ class FootholdReward(ManagerTermBase):
         # Mark ray-miss: hit world-z far below any reasonable terrain
         missed = hits_w.view(-1, H, W, 3)[..., 2] < -100.0
         return torch.where(missed, torch.full_like(z_rel, float("nan")), z_rel)
+
+
+class ActionSmoothnessTerm(ManagerTermBase):
+    """Second-order action smoothness penalty from the paper.
+
+    Computes ``||a_t - 2*a_{t-1} + a_{t-2}||^2`` summed over the full action
+    vector (num_envs, total_action_dim) and returns a per-env scalar cost.
+
+    The cost is positive (larger = less smooth); the RewTerm weight should be
+    negative (paper: ``-2.5e-3``) so it becomes a penalty.
+
+    This is implemented as a **stateful** :class:`ManagerTermBase` (same pattern
+    as :class:`FootholdReward`) so it keeps its own rolling 3-step action
+    history internally and never needs to override ``env.step()``. It reads the
+    raw policy output from ``env.action_manager.action`` (the pre-action-term
+    buffer, updated by ``process_action`` before reward computation).
+
+    ``total_action_dim`` is read dynamically, so it works for any action space
+    (e.g. 29 joints + 1 gait-frequency = 30 for the parkour G1, or 31+1 = 32).
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: "ManagerBasedRLEnv"):
+        super().__init__(cfg, env)
+        self._num_envs = env.num_envs
+        self._device = env.device
+        self._action_dim = env.action_manager.total_action_dim
+        # rolling history index: 0 = current, 1 = t-1, 2 = t-2
+        self._history = torch.zeros(self._num_envs, 3, self._action_dim, device=self._device)
+
+    def __call__(
+        self,
+        env: "ManagerBasedRLEnv",
+        warmup_steps: int = 0,
+    ) -> torch.Tensor:
+        """Compute the smoothness cost for the current step.
+
+        Args:
+            env: The environment.
+            warmup_steps: Zero-out the penalty for the first ``warmup_steps``
+                after a reset, while the action history is still warming up from
+                zeros (avoids a spurious spike at episode start). 0 by default.
+        """
+        a = env.action_manager.action  # (num_envs, total_action_dim) raw policy output
+        # roll the history: t-2 <- t-1, t-1 <- t, t <- new action
+        self._history[:, 2] = self._history[:, 1]
+        self._history[:, 1] = self._history[:, 0]
+        self._history[:, 0] = a
+
+        diff = self._history[:, 0] - 2.0 * self._history[:, 1] + self._history[:, 2]
+        cost = torch.sum(diff * diff, dim=-1)  # (num_envs,)
+
+        if warmup_steps > 0:
+            # mask the first `warmup_steps` control steps after each reset
+            mask = (env.episode_length_buf > warmup_steps).float()
+            cost = cost * mask
+        return cost
+
+    def reset(self, env_ids: torch.Tensor | None = None):
+        """Reset the action history for the given envs (called on env reset)."""
+        if env_ids is None:
+            env_ids = slice(None)
+        self._history[env_ids] = 0.0
+
+
+def action_limit(env: ManagerBasedRLEnv, limit: float = 1.0) -> torch.Tensor:
+    """Count the number of action dimensions outside ``[-limit, limit]``.
+
+    The penalty reward in the paper is ``r = -w * n_lim`` where ``n_lim`` is the
+    number of raw policy outputs exceeding the allowed range. This function
+    returns the (positive) count; attach a negative weight (paper: ``-0.25``).
+
+    Operates on the **raw policy output** (``env.action_manager.action``, before
+    any action-term scaling / clipping), so it does not see gait-frequency that
+    was already clipped to ``[0.7, 1.3]`` in the action term -- it penalises the
+    pre-clipping value. If the policy head is ``tanh`` the output is naturally
+    bounded and this reward is ~0; it is intended as a safety backstop for
+    early-stage / unstable policies.
+    """
+    a = env.action_manager.action  # (num_envs, total_action_dim)
+    exceeded = torch.logical_or(a > limit, a < -limit)
+    return exceeded.sum(dim=-1).float()  # (num_envs,)
