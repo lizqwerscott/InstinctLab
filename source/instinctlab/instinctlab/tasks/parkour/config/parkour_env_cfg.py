@@ -639,7 +639,7 @@ class ActionsCfg:
     )
     gait_frequency = mdp.GaitFrequencyActionCfg(
         asset_name="robot",
-        frequency_range=(1.0, 1.5),
+        frequency_range=(1.5, 2.5),
         ema_alpha=0.2,
         initial_frequency=1.0,
         initial_phase=0.0,
