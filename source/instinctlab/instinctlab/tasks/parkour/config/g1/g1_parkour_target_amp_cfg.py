@@ -101,7 +101,7 @@ class G1ParkourStudentRoughEnvCfg(ParkourStudentEnvCfg):
         self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG
         self.scene.robot = G1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.actuators = beyondmimic_g1_29dof_delayed_actuators
-        self.scene.camera.mesh_prim_paths.extend(get_link_prim_targets(G1_29DOF_LINKS))
+        self.scene.camera.mesh_prim_paths.extend(get_link_prim_targets(G1_29DOF_LINKS, is_shared=True))
         self.scene.motion_reference = motion_reference_cfg
 
 

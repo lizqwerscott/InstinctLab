@@ -19,7 +19,10 @@ if TYPE_CHECKING:
         DepthArtifactNoiseCfg,
         DepthContourNoiseCfg,
         DepthNormalizationCfg,
+        DepthScaleNoiseCfg,
         DepthSkyArtifactNoiseCfg,
+        DistanceDependentGaussianNoiseCfg,
+        PixelFailureNoiseCfg,
         DepthSteroNoiseCfg,
         GaussianBlurNoiseCfg,
         ImageNoiseCfg,
@@ -279,6 +282,66 @@ def depth_normalization(
         data = data.permute(0, 2, 3, 1)
 
     return data
+
+
+def depth_scale_noise(
+    data: torch.Tensor,
+    cfg: DepthScaleNoiseCfg,
+    env_ids: torch.Tensor | Sequence[int],
+) -> torch.Tensor:
+    """Apply a per-frame multiplicative scale to depth images."""
+    scale_shape = (data.shape[0],) + (1,) * (data.ndim - 1)
+    depth_scale = torch_rand_float(
+        cfg.scale_range[0], cfg.scale_range[1], (data.shape[0], 1), device=str(data.device)
+    ).view(scale_shape)
+    return data * depth_scale
+
+
+def pixel_failure_noise(
+    data: torch.Tensor,
+    cfg: PixelFailureNoiseCfg,
+    env_ids: torch.Tensor | Sequence[int],
+) -> torch.Tensor:
+    """Randomly kill individual pixels: dead pixels read 0, saturated pixels read ``max_value``."""
+    max_mask = torch.rand_like(data) < cfg.max_prob
+    data = torch.where(max_mask, torch.full_like(data, cfg.max_value), data)
+    zero_mask = torch.rand_like(data) < cfg.zero_prob
+    return torch.where(zero_mask, torch.zeros_like(data), data)
+
+
+class DistanceDependentGaussianNoiseModel(ImageNoiseModel):
+    """Additive gaussian noise whose std grows quadratically with depth: sigma(d) = |c0 + c1*d + c2*d^2|.
+
+    The coefficients are sampled per environment (to mimic inter-device variations) and
+    resampled on episode reset. Invalid pixels (depth == 0, e.g. stereo holes) are left untouched.
+    """
+
+    def __init__(self, cfg: DistanceDependentGaussianNoiseCfg, num_envs, device):
+        super().__init__(cfg, num_envs, device)
+        self._coefficients = torch.zeros(num_envs, 3, device=device)
+        self.reset()
+
+    def reset(self, env_ids: Sequence[int] | None = None):
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        elif not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
+        self._coefficients[env_ids] = torch_rand_float(
+            self.cfg.coefficient_range[0],
+            self.cfg.coefficient_range[1],
+            (len(env_ids), 3),
+            device=str(self.device),
+        )
+
+    def __call__(self, data: torch.Tensor, cfg: DistanceDependentGaussianNoiseCfg, env_ids: torch.Tensor | Sequence[int]):
+        coefficients = self._coefficients[env_ids]  # (N_, 3)
+        view_shape = (data.shape[0],) + (1,) * (data.ndim - 1)
+        c0 = coefficients[:, 0].view(view_shape)
+        c1 = coefficients[:, 1].view(view_shape)
+        c2 = coefficients[:, 2].view(view_shape)
+        sigma = (c0 + c1 * data + c2 * data.square()).abs()
+        noised = data + torch.randn_like(data) * sigma
+        return torch.where(data > 0, noised, data)
 
 
 class LatencyNoiseModel(ImageNoiseModel):

@@ -19,6 +19,7 @@ from isaaclab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg
 
 import instinctlab.envs.mdp as instinct_mdp
 import instinctlab.tasks.parkour.mdp as mdp
@@ -32,11 +33,14 @@ from instinctlab.utils.noise import (
     CropAndResizeCfg,
     DepthArtifactNoiseCfg,
     DepthNormalizationCfg,
+    DepthScaleNoiseCfg,
     DepthSteroNoiseCfg,
+    DistanceDependentGaussianNoiseCfg,
     GaussianBlurNoiseCfg,
+    PixelFailureNoiseCfg,
     RandomGaussianNoiseCfg,
     RangeBasedGaussianNoiseCfg,
-    ParametricDepthNoiseCfg
+    ParametricDepthNoiseCfg,
 )
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
@@ -219,11 +223,16 @@ class SceneCfg(InteractiveSceneCfg):
         terrain_generator=ROUGH_TERRAINS_CFG,
         max_init_terrain_level=5,
         collision_group=-1,
+        # all three coefficients are set to 1.0 so that with "multiply" combine modes the
+        # per-body values randomized by the ``physics_material`` event pass through unchanged.
+        # NOTE: restitution must be set explicitly -- RigidBodyMaterialCfg defaults it to 0.0,
+        # which under "multiply" would zero out the randomized restitution entirely.
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
+            restitution=1.0,
         ),
         visual_material=sim_utils.MdlFileCfg(
             mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
@@ -317,6 +326,8 @@ class SceneCfg(InteractiveSceneCfg):
                 min_depth=0.2,
                 max_depth=5,
             ),
+            "distance_gaussian": DistanceDependentGaussianNoiseCfg(coefficient_range=(-0.015, 0.015)),
+            "depth_scale": DepthScaleNoiseCfg(scale_range=(0.97, 1.03)),
             # "gaussian_noise": RangeBasedGaussianNoiseCfg(noise_std = 0.02, min_value = 0.2, max_value = 1.5),
             # "stereo_failure": DepthSteroNoiseCfg(
             #     stero_far_distance=3.0,
@@ -330,8 +341,10 @@ class SceneCfg(InteractiveSceneCfg):
             #     stero_half_block_spark_prob=0.05,
             #     stero_half_block_value=3000,
             # ),
-            "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
             # "random_gaussian_noise": RandomGaussianNoiseCfg(noise_mean=0.0, noise_std=1, probability=0.05),
+            # after blur so dead/saturated pixels are not smeared away; max_value matches the
+            # normalization upper bound below so saturated pixels normalize to 1.0
+            "pixel_failure": PixelFailureNoiseCfg(zero_prob=0.001, max_prob=0.001, max_value=2.5),
             "depth_normalization": DepthNormalizationCfg(
                 depth_range=(0.0, 2.5),
                 normalize=True,
@@ -346,7 +359,7 @@ class SceneCfg(InteractiveSceneCfg):
                 output_range=(0.0, 1.0),
             ),
         },
-        data_histories={"distance_to_image_plane_noised": 37, "distance_to_image_plane_handled": 37},
+        data_histories={"distance_to_image_plane_noised": 5, "distance_to_image_plane_handled": 5},
     )
     heightmap_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/torso_link",
@@ -379,7 +392,12 @@ class ObservationsCfg:
         # observation terms (order preserved)
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
-            noise=Unoise(n_min=-0.2, n_max=0.2),
+            # white noise + per-episode constant IMU bias (resampled on reset);
+            # bias uses operation="abs" so it does not accumulate across resets
+            noise=NoiseModelWithAdditiveBiasCfg(
+                noise_cfg=Unoise(n_min=-0.2, n_max=0.2),
+                bias_noise_cfg=Unoise(n_min=-0.04, n_max=0.04, operation="abs"),
+            ),
             history_length=8,
             flatten_history_dim=True,
             scale=0.25,
@@ -567,12 +585,22 @@ class StudentObservationsCfg:
         # observation terms (order preserved)
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
-            noise=Unoise(n_min=-0.2, n_max=0.2),
+            # white noise + per-episode constant IMU bias (resampled on reset).
+            # NOTE: intentionally NOT added to CriticCfg below - that group feeds the
+            # teacher during distillation, and the teacher checkpoint was trained
+            # without bias, so its supervision input stays clean.
+            noise=NoiseModelWithAdditiveBiasCfg(
+                noise_cfg=Unoise(n_min=-0.2, n_max=0.2),
+                bias_noise_cfg=Unoise(n_min=-0.04, n_max=0.04, operation="abs"),
+            ),
             scale=0.25,
         )
         projected_gravity = ObsTerm(
             func=mdp.projected_gravity,
-            noise=Unoise(n_min=-0.05, n_max=0.05),
+            noise=NoiseModelWithAdditiveBiasCfg(
+                noise_cfg=Unoise(n_min=-0.04, n_max=0.04),
+                bias_noise_cfg=Unoise(n_min=-0.04, n_max=0.04, operation="abs"),
+            ),
         )
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
@@ -593,9 +621,9 @@ class StudentObservationsCfg:
             params={
                 "data_type": "distance_to_image_plane_noised_history",
                 "sensor_cfg": SceneEntityCfg("camera"),
-                "history_skip_frames": 5,
+                "history_skip_frames": 0,
                 "num_output_frames": 1,
-                "delayed_frame_ranges": (0, 1),
+                "delayed_frame_ranges": (2, 4),
                 "debug_vis": False,
             },
             noise=None,
@@ -977,8 +1005,8 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.3, 1.6),
-            "dynamic_friction_range": (0.3, 1.6),
+            "static_friction_range": (0.3, 1.2),
+            "dynamic_friction_range": (0.3, 1.2),
             "restitution_range": (0.05, 0.5),
             "num_buckets": 64,
             "make_consistent": True,
@@ -992,6 +1020,41 @@ class EventCfg:
                 "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
                 "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
             },
+    )
+
+    body_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "mass_distribution_params": (0.8, 1.2),
+            "operation": "scale",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.9, 1.1),
+            "damping_distribution_params": (0.9, 1.1),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "armature_distribution_params": (0.8, 1.2),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
     )
 
     # reset
@@ -1041,7 +1104,18 @@ class EventCfg:
                 "pitch": (-0.174, 0.174),
                 "yaw": (-0.05, 0.05)
             },
-            "distribution": "gaussian"
+            "distribution": "uniform"
+        },
+    )
+
+    camera_intrinsics = EventTerm(
+        func=mdp.randomize_camera_intrinsics,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("camera"),
+            "horizontal_scale_range": (0.90, 1.10),
+            "vertical_scale_range": (0.90, 1.10),
+            "distribution": "uniform",
         },
     )
 
@@ -1049,7 +1123,7 @@ class EventCfg:
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity_without_stand,
         mode="interval",
-        interval_range_s=(1.0, 3.0),
+        interval_range_s=(2.0, 5.0),
         params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"), "velocity_range": VELOCITY_RANGE},
     )
 

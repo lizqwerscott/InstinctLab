@@ -157,13 +157,14 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     distill_target = "mse_sum"
 
     num_learning_epochs = 5
-    num_mini_batches = 4
+    buffer_dilation_ratio = 2.0
+    num_mini_batches = 8
     learning_rate = 1e-3
 
     lr_scheduler_class_name = "CosineAnnealingLR"
     lr_scheduler: dict = {
         "T_max": 30000,
-        "eta_min": 1.0e-5,
+        "eta_min": 3.0e-5,
     }
 
     teacher_act_prob = "linear"
@@ -254,7 +255,8 @@ class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
 class G1ParkourStudentPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 30000
-    save_interval = 5000
+    init_at_random_ep_len = True
+    save_interval = 2000
     experiment_name = "g1_parkour_student"
     resume = False
     load_run = ""

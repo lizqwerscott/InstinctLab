@@ -217,3 +217,47 @@ def randomize_camera_offsets(
         env_ids=env_ids,
         convention=sensor.cfg.offset.convention,
     )
+
+
+def randomize_camera_intrinsics(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    horizontal_scale_range: tuple[float, float],
+    vertical_scale_range: tuple[float, float],
+    distribution: Literal["uniform", "log_uniform", "gaussian"] = "uniform",
+):
+    """Randomize camera intrinsics by scaling the nominal focal lengths.
+
+    The scaling is applied to ``fx`` and ``fy`` in the intrinsic matrix and the camera recomputes its rays.
+    """
+    sensor: Camera | RayCasterCamera | GroupedRayCasterCamera = env.scene[asset_cfg.name]
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=sensor._device)
+
+    if not hasattr(sensor, "_nominal_intrinsic_matrices"):
+        sensor._nominal_intrinsic_matrices = sensor._data.intrinsic_matrices.clone()
+
+    def sample_scale(scale_range: tuple[float, float]) -> torch.Tensor:
+        if distribution == "uniform":
+            return math_utils.sample_uniform(*scale_range, (len(env_ids),), device=sensor._device)
+        elif distribution == "log_uniform":
+            return math_utils.sample_log_uniform(*scale_range, (len(env_ids),), device=sensor._device)
+        elif distribution == "gaussian":
+            return math_utils.sample_gaussian(*scale_range, (len(env_ids),), device=sensor._device)
+        else:
+            raise NotImplementedError(
+                f"Unknown distribution: '{distribution}' for camera intrinsic randomization."
+                " Please use 'uniform', 'log_uniform', or 'gaussian'."
+            )
+
+    intrinsic_matrices = sensor._nominal_intrinsic_matrices[env_ids].clone()
+    intrinsic_matrices[:, 0, 0] *= sample_scale(horizontal_scale_range)
+    intrinsic_matrices[:, 1, 1] *= sample_scale(vertical_scale_range)
+
+    focal_length = getattr(sensor, "_focal_length", None)
+    if focal_length is None:
+        sensor.set_intrinsic_matrices(intrinsic_matrices, env_ids=env_ids)
+    else:
+        sensor.set_intrinsic_matrices(intrinsic_matrices, focal_length=focal_length, env_ids=env_ids)

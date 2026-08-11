@@ -142,6 +142,9 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
             term_cfg.history_length = 1
 
         # clean cfg
+        # noise may hold a NoiseModel instance (injected by the observation manager)
+        # which is not serializable; drop it before to_dict
+        term_cfg.noise = None
         term_cfg = term_cfg.to_dict()
         for _ in ["func", "modifiers", "noise", "flatten_history_dim"]:
             del term_cfg[_]

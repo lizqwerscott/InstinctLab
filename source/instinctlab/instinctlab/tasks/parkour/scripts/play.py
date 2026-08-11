@@ -4,6 +4,7 @@
 
 import argparse
 import os
+import pickle
 import subprocess
 import sys
 
@@ -28,6 +29,7 @@ parser.add_argument("--exportonnx", action="store_true", default=False, help="Ex
 parser.add_argument("--useonnx", action="store_true", default=False, help="Use the exported ONNX model for inference.")
 parser.add_argument("--debug", action="store_true", default=False, help="Enable debug mode.")
 parser.add_argument("--no_resume", default=None, action="store_true", help="Force play in no resume mode.")
+parser.add_argument("--teacher_logdir", type=str, default=None, help="Teacher Logdir.")
 # custom play arguments
 parser.add_argument("--env_cfg", action="store_true", default=False, help="Load configuration from file.")
 parser.add_argument("--agent_cfg", action="store_true", default=False, help="Load configuration from file.")
@@ -36,6 +38,24 @@ parser.add_argument("--zero_act_until", type=int, default=0, help="Zero actions 
 parser.add_argument("--keyboard_control", action="store_true", default=False, help="Enable keyboard control.")
 parser.add_argument("--keyboard_linvel_step", type=float, default=0.5, help="Linear velocity change per keyboard step.")
 parser.add_argument("--keyboard_angvel", type=float, default=1.0, help="Angular velocity set by keyboard.")
+parser.add_argument(
+    "--attention_heatmap",
+    action="store_true",
+    default=False,
+    help="Save cross-attention heatmaps for the upstairs and downstairs environments.",
+)
+parser.add_argument(
+    "--attention_interval",
+    type=int,
+    default=10,
+    help="Save one attention heatmap every N policy steps.",
+)
+parser.add_argument(
+    "--attention_output_dir",
+    type=str,
+    default=None,
+    help="Heatmap output directory. Defaults to <run>/attention_heatmaps.",
+)
 
 # append Instinct-RL cli arguments
 cli_args.add_instinct_rl_args(parser)
@@ -55,20 +75,19 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import torch
 
-import carb.input
-import omni.appwindow
-from carb.input import KeyboardEventType
 from instinct_rl.runners import OnPolicyRunner
 from instinct_rl.utils.utils import get_obs_slice, get_subobs_by_components
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import load_pickle, load_yaml
+from isaaclab.utils.io import load_yaml
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 
 # Import extensions to set up environment tasks
+from instinctlab.utils import attention_heatmap
 from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
 from instinctlab.utils.wrappers.instinct_rl import InstinctRlOnPolicyRunnerCfg
+
 
 # wait for attach if in debug mode
 if args_cli.debug:
@@ -115,11 +134,18 @@ def main():
         resume_path = "model_scratch.pt"
 
     if args_cli.env_cfg:
-        env_cfg = load_pickle(os.path.join(log_dir, "params", "env.pkl"))
+        with open(os.path.join(log_dir, "params", "env.pkl"), "rb") as f:
+            env_cfg = pickle.load(f)
     if args_cli.agent_cfg:
         agent_cfg_dict = load_yaml(os.path.join(log_dir, "params", "agent.yaml"))
     else:
         agent_cfg_dict = agent_cfg.to_dict()
+
+    if args_cli.attention_heatmap:
+        if args_cli.keyboard_control:
+            raise ValueError("--attention_heatmap cannot be combined with --keyboard_control")
+        if not attention_heatmap.configure_staircase_terrains(env_cfg):
+            raise RuntimeError("Attention heatmaps require a generated terrain with the staircase sub-terrains.")
 
     if args_cli.keyboard_control:
         env_cfg.scene.num_envs = 1
@@ -146,6 +172,9 @@ def main():
 
     # wrap around environment for instinct-rl
     env = InstinctRlVecEnvWrapper(env)
+    attention_terrain_level = None
+    if args_cli.attention_heatmap:
+        attention_terrain_level = attention_heatmap.move_envs_to_hardest_terrain(env)
 
     # load previously trained model
     ppo_runner = OnPolicyRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
@@ -158,6 +187,29 @@ def main():
         policy = ppo_runner.alg.actor_critic.act
     else:
         policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+
+    attention_recorder = None
+    if args_cli.attention_heatmap:
+        attention_labels = attention_heatmap.staircase_labels(env)
+        attention_recorder = attention_heatmap.AttentionHeatmapRecorder(
+            env,
+            ppo_runner.alg.actor_critic,
+            output_dir=args_cli.attention_output_dir or os.path.join(log_dir, "attention_heatmaps"),
+            interval=args_cli.attention_interval,
+            labels=attention_labels,
+            title_context=f"hardest level {attention_terrain_level}",
+        )
+        policy_dt = env_cfg.sim.dt * env_cfg.decimation
+        max_episode_steps = round(env_cfg.episode_length_s / policy_dt)
+        print(
+            f"[ATTENTION] Monitoring {attention_recorder.head_name} on {attention_labels} at hardest terrain level "
+            f"{attention_terrain_level}/{env.unwrapped.scene.terrain.max_terrain_level - 1}. "
+            f"Episode limit: {max_episode_steps} policy steps ({env_cfg.episode_length_s:g} s at {policy_dt:g} s/step)."
+        )
+        print(
+            f"[ATTENTION] Saving every {args_cli.attention_interval} steps to {attention_recorder.output_dir} "
+            f"(~{(max_episode_steps - 1) // args_cli.attention_interval + 1} images per full episode/environment)."
+        )
 
     # export policy to onnx/jit
     if agent_cfg.load_run is not None:
@@ -202,27 +254,34 @@ def main():
     override_command = torch.zeros(env.num_envs, 3, device=env.device)
     command_obs_slice = get_obs_slice(env.get_obs_segments(), "velocity_commands")
 
-    def on_keyboard_input(e):
-        if e.input == carb.input.KeyboardInput.W:
-            if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
-                override_command[:, 0] += args_cli.keyboard_linvel_step
-        if e.input == carb.input.KeyboardInput.S:
-            if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
-                override_command[:, 2] = 0.0
-        if e.input == carb.input.KeyboardInput.F:
-            if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
-                override_command[:, 2] = args_cli.keyboard_angvel
-        if e.input == carb.input.KeyboardInput.G:
-            if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
-                override_command[:, 2] = -args_cli.keyboard_angvel
-        if e.input == carb.input.KeyboardInput.X:
-            if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
-                override_command[:] = 0.0
+    if args_cli.keyboard_control:
+        # These are kit windowing extensions: they are only loaded when the app runs
+        # with a window, so keep the imports out of the headless code path.
+        import carb.input
+        import omni.appwindow
+        from carb.input import KeyboardEventType
 
-    app_window = omni.appwindow.get_default_app_window()
-    keyboard = app_window.get_keyboard()
-    input = carb.input.acquire_input_interface()
-    input.subscribe_to_keyboard_events(keyboard, on_keyboard_input)
+        def on_keyboard_input(e):
+            if e.input == carb.input.KeyboardInput.W:
+                if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
+                    override_command[:, 0] += args_cli.keyboard_linvel_step
+            if e.input == carb.input.KeyboardInput.S:
+                if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
+                    override_command[:, 2] = 0.0
+            if e.input == carb.input.KeyboardInput.F:
+                if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
+                    override_command[:, 2] = args_cli.keyboard_angvel
+            if e.input == carb.input.KeyboardInput.G:
+                if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
+                    override_command[:, 2] = -args_cli.keyboard_angvel
+            if e.input == carb.input.KeyboardInput.X:
+                if e.type == KeyboardEventType.KEY_PRESS or e.type == KeyboardEventType.KEY_REPEAT:
+                    override_command[:] = 0.0
+
+        app_window = omni.appwindow.get_default_app_window()
+        keyboard = app_window.get_keyboard()
+        input = carb.input.acquire_input_interface()
+        input.subscribe_to_keyboard_events(keyboard, on_keyboard_input)
 
     # reset environment
     obs, _ = env.get_observations()
@@ -235,6 +294,9 @@ def main():
             if args_cli.keyboard_control:
                 obs[:, command_obs_slice[0]] = override_command.repeat(1, command_obs_slice[1][0] // 3)
             actions = policy(obs)
+            # plot the attention weights of the forward pass we just ran
+            if attention_recorder is not None:
+                attention_recorder.save_due_heatmaps(obs)
             if args_cli.useonnx:
                 torch_actions = actions
                 actions = onnx_policy(obs)
@@ -252,7 +314,13 @@ def main():
                 ppo_runner.alg.actor_critic.reset(dones)
             if args_cli.useonnx and hasattr(onnx_policy, "reset"):
                 onnx_policy.reset(dones)
+            if attention_recorder is not None:
+                attention_recorder.step(dones)
         timestep += 1
+
+        if attention_recorder is not None and attention_recorder.finished:
+            print("[ATTENTION] Saved the first episode for every staircase environment; stopping play.")
+            break
 
         # exit the loop if video_length is meet
         if args_cli.video:

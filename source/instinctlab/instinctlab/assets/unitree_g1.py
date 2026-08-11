@@ -388,6 +388,9 @@ beyondmimic_g1_29dof_actuators = {
 }
 
 
+# NOTE: ``min_delay``/``max_delay`` are counted in *physics* steps, not policy steps.
+# With sim.dt = 0.005 and decimation = 4 (50 Hz policy), max_delay=4 covers 0-20 ms, i.e. up to
+# one full control period -- the observe -> infer -> CAN -> motor-response latency of the real G1.
 beyondmimic_g1_29dof_delayed_actuators = {
     "legs": DelayedPDActuatorCfg(
         joint_names_expr=[
@@ -427,7 +430,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
             ".*_knee_joint": ARMATURE_7520_22,
         },
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "feet": DelayedPDActuatorCfg(
         effort_limit_sim=50.0,
@@ -437,7 +440,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
         damping=2.0 * DAMPING_5020,
         armature=2.0 * ARMATURE_5020,
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "waist": DelayedPDActuatorCfg(
         effort_limit_sim=50,
@@ -447,7 +450,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
         damping=2.0 * DAMPING_5020,
         armature=2.0 * ARMATURE_5020,
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "waist_yaw": DelayedPDActuatorCfg(
         effort_limit_sim=88,
@@ -457,7 +460,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
         damping=DAMPING_7520_14,
         armature=ARMATURE_7520_14,
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "arms": DelayedPDActuatorCfg(
         joint_names_expr=[
@@ -515,7 +518,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
             ".*_wrist_yaw_joint": ARMATURE_4010,
         },
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
 }
 

@@ -168,6 +168,16 @@ class delayed_visualizable_image(ManagerTermBase):
         """
         if env_ids is None:
             env_ids = slice(None)
+        if self.delayed_frame_distribution == "uniform":
+            min_delay, max_delay = self.delayed_frame_ranges
+            num_env_ids = self._num_delayed_frames[env_ids].shape[0]
+            self._num_delayed_frames[env_ids] = torch.randint(
+                min_delay,
+                max_delay + 1,
+                (num_env_ids,),
+                device=self._num_delayed_frames.device,
+            ).to(self._num_delayed_frames.dtype)
+            return
         self._num_delayed_frames[env_ids] = _randomize_prop_by_op(
             self._num_delayed_frames[env_ids].unsqueeze(-1),
             self.delayed_frame_ranges,

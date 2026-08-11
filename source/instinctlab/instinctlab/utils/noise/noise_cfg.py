@@ -6,6 +6,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import NoiseCfg
 
 from .noise_model import (
+    DistanceDependentGaussianNoiseModel,
     ImageNoiseModel,
     LatencyNoiseModel,
     SensorDeadNoiseModel,
@@ -15,9 +16,11 @@ from .noise_model import (
     depth_artifact_noise,
     depth_contour_noise,
     depth_normalization,
+    depth_scale_noise,
     depth_sky_artifact_noise,
     depth_stero_noise,
     gaussian_blur_noise,
+    pixel_failure_noise,
     random_gaussian_noise,
     range_based_gaussian_noise,
     stereo_too_close_noise,
@@ -143,6 +146,45 @@ class DepthNormalizationCfg(ImageNoiseCfg):
 
     func = depth_normalization
     """The noise model class to apply depth normalization."""
+
+
+@configclass
+class DepthScaleNoiseCfg(ImageNoiseCfg):
+    """Configuration for multiplicative depth scale noise."""
+
+    scale_range: tuple[float, float] = (0.9, 1.1)
+    """The multiplicative depth scale range."""
+
+    func = depth_scale_noise
+
+
+@configclass
+class DistanceDependentGaussianNoiseCfg(ImageNoiseCfg):
+    """Configuration for gaussian noise with quadratically distance-dependent std:
+    sigma(d) = |c0 + c1*d + c2*d^2|, with c0, c1, c2 sampled per environment and
+    resampled on episode reset.
+    """
+
+    coefficient_range: tuple[float, float] = (-0.03, 0.03)
+    """The uniform sampling range for the polynomial coefficients c0, c1, c2."""
+
+    func = DistanceDependentGaussianNoiseModel
+
+
+@configclass
+class PixelFailureNoiseCfg(ImageNoiseCfg):
+    """Configuration for random per-pixel failures (dead and saturated pixels)."""
+
+    zero_prob: float = 0.001
+    """The probability of a pixel reading 0 (dead pixel)."""
+
+    max_prob: float = 0.001
+    """The probability of a pixel reading ``max_value`` (saturated pixel)."""
+
+    max_value: float = 2.5
+    """The depth value a saturated pixel reads."""
+
+    func = pixel_failure_noise
 
 
 @configclass
