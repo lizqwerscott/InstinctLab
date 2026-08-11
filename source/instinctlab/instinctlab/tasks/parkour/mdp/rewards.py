@@ -687,9 +687,10 @@ class FootholdReward(ManagerTermBase):
             # --- Tracking reward for currently-swinging feet ----------
             tracking_mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
             if tracking_mask.any():
-                # Quintic-smoothstep time warping (zero endpoint vel/acc).
+                # Cubic-smoothstep time warping (zero endpoint velocity).
+                # f(x) = 3x² − 2x³,  f'(0)=f'(1)=0,  f'(0.5)=1.5.
                 u_time_clamped = (self._swing_elapsed[tracking_mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)
-                u = u_time_clamped**3 * (10.0 - 15.0 * u_time_clamped + 6.0 * u_time_clamped**2)
+                u = u_time_clamped**2 * (3.0 - 2.0 * u_time_clamped)
                 u_unsq = u.unsqueeze(-1)
 
                 P0 = self._lift_off_pos[tracking_mask, foot_idx]
