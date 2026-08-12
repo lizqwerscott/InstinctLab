@@ -158,7 +158,9 @@ class DCMFootholdPlanner:
         The integrated frequency σ(T) over swing time T:
             σ(T) = ∫₀ᵀ ω(τ)dτ = 2√g · (√(kT+z₀) − √z₀) / k
 
-        The DCM amplifies by exp(σ(T)) over the swing phase.
+        The DCM evolves as ξ(t) = u₀ + (ξ₀ − u₀)·exp(σ(t)) with CoP u₀ fixed at
+        the stance foot during swing, so the *offset from the CoP* amplifies by
+        exp(σ(T)) over the swing phase.
 
         When k → 0 (flat ground), σ(T) → ω₀·T where ω₀ = √(g/z₀).
 
@@ -169,7 +171,7 @@ class DCMFootholdPlanner:
                k < 0  →  descending (CoM falls)
 
         Returns:
-            exp_sigma:  (N,)  e^{σ(T)} — DCM amplification factor
+            exp_sigma:  (N,)  e^{σ(T)} — amplification factor of the CoP offset (ξ₀ − u₀)
             exp_sigma_m1: (N,)  e^{σ(T)} − 1  (safe, clamped away from 0)
         """
         g = 9.81
@@ -295,8 +297,11 @@ class DCMFootholdPlanner:
         # DCM residual d_dcm (Eq. 1 second term)
         #
         # DCM dynamics on variable-height LIPM:
-        #   ξ(t) = ξ₀ · exp(∫₀ᵗ ω(τ)dτ) = ξ₀ · e^{σ(t)}
-        #   where ω(τ) = √(g / z(τ))  and  z(τ) = k·τ + z₀
+        #   ξ̇ = ω(t)·(ξ − u₀)   with CoP u₀ = stance foot (fixed during swing)
+        #   ω(τ) = √(g / z(τ)),  z(τ) = k·τ + z₀
+        #
+        # General solution (homogeneous offset from the CoP amplifies):
+        #   ξ(t) = u₀ + (ξ₀ − u₀)·exp(∫₀ᵗ ω(τ)dτ) = u₀ + (ξ₀ − u₀)·e^{σ(t)}
         #
         # σ(T) = 2√g · (√(kT+z₀) − √z₀) / k
         #
@@ -324,12 +329,14 @@ class DCMFootholdPlanner:
             one_plus_exp = 1.0 + exp_sigma_exp
             by_map = (sgn_exp * self.lp) / one_plus_exp + W_nom / exp_sigma_m1_exp
 
-            # ξ_T = ξ₀ · e^{σ(T)}
+            # ξ_T = u₀ + (ξ₀ − u₀)·e^{σ(T)},  u₀ = stance foot (CoP) in pelvis-local
             if com_local is not None and com_vel_local is not None:
                 xi_0_x = com_local[:, 0] + com_vel_local[:, 0] / self.omega0
                 xi_0_y = com_local[:, 1] + com_vel_local[:, 1] / self.omega0
-                xi_T_x = (xi_0_x * exp_sigma).view(N, 1, 1)
-                xi_T_y = (xi_0_y * exp_sigma).view(N, 1, 1)
+                u0_x = stance_xyz_local[:, 0]
+                u0_y = stance_xyz_local[:, 1]
+                xi_T_x = (u0_x + (xi_0_x - u0_x) * exp_sigma).view(N, 1, 1)
+                xi_T_y = (u0_y + (xi_0_y - u0_y) * exp_sigma).view(N, 1, 1)
             else:
                 # Fallback: no CoM state → d_dcm reduces to position norm
                 xi_T_x = gx_map + bx_map
@@ -344,12 +351,14 @@ class DCMFootholdPlanner:
             one_plus_exp_flat = 1.0 + self.exp_wT_flat
             by_map = (sgn_exp * self.lp) / one_plus_exp_flat + W_nom / (self.exp_wT_flat - 1.0)
 
-            # ξ_T = ξ₀ · e^{ω₀·T}
+            # ξ_T = u₀ + (ξ₀ − u₀)·e^{ω₀·T},  u₀ = stance foot (CoP) in pelvis-local
             if com_local is not None and com_vel_local is not None:
                 xi_0_x = com_local[:, 0] + com_vel_local[:, 0] / self.omega0
                 xi_0_y = com_local[:, 1] + com_vel_local[:, 1] / self.omega0
-                xi_T_x = (xi_0_x * self.exp_wT_flat).view(N, 1, 1)
-                xi_T_y = (xi_0_y * self.exp_wT_flat).view(N, 1, 1)
+                u0_x = stance_xyz_local[:, 0]
+                u0_y = stance_xyz_local[:, 1]
+                xi_T_x = (u0_x + (xi_0_x - u0_x) * self.exp_wT_flat).view(N, 1, 1)
+                xi_T_y = (u0_y + (xi_0_y - u0_y) * self.exp_wT_flat).view(N, 1, 1)
             else:
                 xi_T_x = gx_map + bx_map
                 xi_T_y = gy_map + by_map
