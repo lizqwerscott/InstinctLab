@@ -20,6 +20,7 @@ from isaaclab.sensors.ray_caster.patterns import PinholeCameraPatternCfg
 from isaaclab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
+from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import instinctlab.envs.mdp as instinct_mdp
@@ -448,7 +449,7 @@ class ObservationsCfg:
             func=mdp.height_scan_feat,
             params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
             history_length=4,
-            noise=None,
+            noise=Gnoise(mean=0.0, std=0.05),
         )
 
         def __post_init__(self):
@@ -977,6 +978,19 @@ class EventCfg:
                 "yaw": (-0.05, 0.05),
             },
             "distribution": "gaussian",
+        },
+    )
+
+    heightmap_scanner_offsets = EventTerm(
+        func=mdp.randomize_ray_offsets,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("heightmap_scanner"),
+            "offset_pose_ranges": {
+                "x": (-0.02, 0.02),
+                "y": (-0.02, 0.02)
+            },
+            "distribution": "uniform",
         },
     )
 
