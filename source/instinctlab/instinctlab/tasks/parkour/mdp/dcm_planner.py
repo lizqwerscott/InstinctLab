@@ -211,8 +211,15 @@ class DCMFootholdPlanner:
         com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = straight gait
     ) -> dict[str, torch.Tensor]:
         """Compute all intermediate cost channels.
+
+        If omega_z is given, the nominal step is superimposed with the turning
+        corrections (Δψ = ω_z·T): the translation part (v·T) rotates by the
+        mid-swing heading Δψ/2 (chord direction of the arc path) and the
+        lateral leg offset (0, sgn·lp) rotates by the full yaw Δψ, so
+        L_nom/W_nom (and hence d_pos and the b_nom maps) describe the turning gait.
 
         Returns dict with keys:
             Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
@@ -290,6 +297,32 @@ class DCMFootholdPlanner:
         # ---- Nominal step length and width (common to d_pos and b_nom) ----
         L_nom = vx_map * self.T  # (N,1,1)  = vx·T
         W_nom = vy_map * self.T + sgn_map * self.lp  # (N,1,1)  = vy·T + (-1)ⁱ·l
+
+        # ---- Turning: chord-aimed desired foothold (Δψ = ω_z·T) ----
+        # Superposition of two rotations, exact for steady circular walking:
+        # 1) Translation part (v·T) is a process quantity accumulated over
+        #    the swing -> rotate by the mid-swing heading Δψ/2 (chord /
+        #    midpoint rule of the arc path).
+        # 2) Lateral offset (0, sgn·lp) is a touchdown-instant constraint ->
+        #    rotate by the full yaw Δψ.
+        # ω_z=0 is a bit-exact no-op (straight gait unchanged).
+        if omega_z is not None:
+            dpsi = omega_z.view(N, 1, 1) * self.T
+            dpsi_half = 0.5 * dpsi
+
+            # 1) chord rotation of the translational step (Δψ/2)
+            trans_x = vx_map * self.T
+            trans_y = vy_map * self.T
+            sin_h, cos_h = torch.sin(dpsi_half), torch.cos(dpsi_half)
+            rot_tx = trans_x * (cos_h - 1.0) - trans_y * sin_h
+            rot_ty = trans_x * sin_h + trans_y * (cos_h - 1.0)
+
+            # 2) full rotation of the lateral offset (Δψ)
+            rot_x = -sgn_map * self.lp * torch.sin(dpsi)
+            rot_y = sgn_map * self.lp * (torch.cos(dpsi) - 1.0)
+
+            L_nom = L_nom + rot_tx + rot_x
+            W_nom = W_nom + rot_ty + rot_y
 
         d_pos = (gx_map - L_nom) ** 2 + self.beta * (gy_map - W_nom) ** 2
 
@@ -405,6 +438,7 @@ class DCMFootholdPlanner:
         com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = straight gait
     ) -> torch.Tensor:
         """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
         channels = self._compute_channels(
@@ -415,6 +449,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            omega_z=omega_z,
         )
         return self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)[0]
 
@@ -462,6 +497,7 @@ class DCMFootholdPlanner:
         com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = straight gait
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Returns (p_star, channels) where channels contains all intermediate costs.
 
@@ -476,6 +512,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            omega_z=omega_z,
         )
         p_star, best_idx = self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)
         channels["best_idx"] = best_idx
@@ -492,8 +529,12 @@ class DCMFootholdPlanner:
         com_pos_w: torch.Tensor | None = None,  # (N, 3) CoM world pos
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = straight gait
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute best foothold in world frame + return all cost channels.
+
+        omega_z is the base-frame yaw rate; its z-component is frame-invariant
+        (pelvis z ≈ base z), so it is used as-is without world→pelvis rotation.
 
         Returns (p_world, channels) where channels has keys:
             Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
@@ -524,6 +565,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            omega_z=omega_z,
         )
 
         # -- Rotate back: pelvis-local -> world --
@@ -546,8 +588,13 @@ class DCMFootholdPlanner:
         com_pos_w: torch.Tensor | None = None,  # (N, 3) CoM world pos
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = straight gait
     ) -> torch.Tensor:
-        """Compute best foothold in world frame."""
+        """Compute best foothold in world frame.
+
+        omega_z is the base-frame yaw rate; its z-component is frame-invariant
+        (pelvis z ≈ base z), so it is used as-is without world→pelvis rotation.
+        """
         N = root_pos_w.shape[0]
         zeros1 = torch.zeros(N, 1, device=root_pos_w.device, dtype=root_pos_w.dtype)
 
@@ -573,6 +620,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            omega_z=omega_z,
         )
 
         # -- Rotate back: pelvis-local -> world (yaw-only, matching heightmap) --

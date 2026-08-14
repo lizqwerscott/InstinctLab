@@ -536,7 +536,9 @@ class FootholdReward(ManagerTermBase):
         # ---- 3. Common quantities (shared by planning & reward) ----------
         root_pos = asset.data.root_pos_w  # (N, 3)
         root_quat = asset.data.root_quat_w  # (N, 4) w,x,y,z
-        v_cmd = env.command_manager.get_command("base_velocity")[:, :2]  # (N, 2) world
+        command = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
+        v_cmd = command[:, :2]  # (N, 2)
+        omega_z = command[:, 2]  # (N,) body-frame yaw rate (rad/s)
         heightmap = self._get_heightmap(env, root_pos)  # (N, 25, 37)
 
         # Approximate CoM state from root (pelvis) state.
@@ -583,6 +585,7 @@ class FootholdReward(ManagerTermBase):
                         com_pos_w=com_pos_w[mask],
                         com_vel_w=com_vel_w[mask],
                         k=k[mask],
+                        omega_z=omega_z[mask],
                     )
                     self._p_star_cache[mask, 0] = p_new
                 else:  # right foot
@@ -596,6 +599,7 @@ class FootholdReward(ManagerTermBase):
                         com_pos_w=com_pos_w[mask],
                         com_vel_w=com_vel_w[mask],
                         k=k[mask],
+                        omega_z=omega_z[mask],
                     )
                     self._p_star_cache[mask, 1] = p_new
                 self._swing_planned[mask, foot_idx] = True
@@ -645,6 +649,7 @@ class FootholdReward(ManagerTermBase):
                 com_pos_w=com_pos_w,
                 com_vel_w=com_vel_w,
                 k=k,
+                omega_z=omega_z,
             )
             (
                 p_right_swing_vis,
@@ -659,6 +664,7 @@ class FootholdReward(ManagerTermBase):
                 com_pos_w=com_pos_w,
                 com_vel_w=com_vel_w,
                 k=k,
+                omega_z=omega_z,
             )
             self._last_heightmap = heightmap
             self._last_root_pos = root_pos
