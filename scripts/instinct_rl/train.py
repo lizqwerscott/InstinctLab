@@ -71,6 +71,7 @@ import torch
 import torch.distributed as dist
 from datetime import datetime
 
+import instinct_rl.runners as instinct_rl_runners
 from instinct_rl.runners import OnPolicyRunner
 
 from isaaclab.envs import (
@@ -202,8 +203,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for instinct-rl
     env = InstinctRlVecEnvWrapper(env)
 
-    # create runner from instinct-rl
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    # create runner from instinct-rl. `runner_class_name` selects the runner subclass; it
+    # defaults to OnPolicyRunner, so existing configs are unaffected.
+    agent_cfg_dict = agent_cfg.to_dict()
+    runner_class = getattr(instinct_rl_runners, agent_cfg_dict.get("runner_class_name", "OnPolicyRunner"))
+    runner = runner_class(env, agent_cfg_dict, log_dir=log_dir, device=agent_cfg.device)
     # # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint

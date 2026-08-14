@@ -40,6 +40,31 @@ parser.add_argument(
     default=False,
     help="Whether to assign auxiliary rewards to each of the env's reward term.",
 )
+# attention heatmap arguments
+parser.add_argument(
+    "--attention_heatmap",
+    action="store_true",
+    default=False,
+    help="Save cross-attention heatmaps of the depth encoder while playing.",
+)
+parser.add_argument(
+    "--attention_interval", type=int, default=10, help="Save one attention heatmap every N policy steps."
+)
+parser.add_argument(
+    "--attention_output_dir",
+    type=str,
+    default=None,
+    help="Heatmap output directory. Defaults to <run>/attention_heatmaps.",
+)
+parser.add_argument(
+    "--attention_max_envs",
+    type=int,
+    default=2,
+    help="Number of environments to record when the task has no staircase terrains.",
+)
+parser.add_argument(
+    "--attention_depth_obs", type=str, default="depth_image", help="Name of the depth observation component."
+)
 # append Instinct-RL cli arguments
 cli_args.add_instinct_rl_args(parser)
 # append AppLauncher cli args
@@ -61,6 +86,7 @@ import os
 import time
 import torch
 
+import instinct_rl.runners as instinct_rl_runners
 from instinct_rl.runners import OnPolicyRunner
 
 import isaaclab.utils.math as math_utils
@@ -72,6 +98,7 @@ from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 # Import extensions to set up environment tasks
 import instinctlab.tasks  # noqa: F401
 from instinctlab.managers.reward_manager import MultiRewardManager
+from instinctlab.utils import attention_heatmap
 from instinctlab.utils.wrappers import InstinctRlVecEnvWrapper
 from instinctlab.utils.wrappers.instinct_rl import InstinctRlOnPolicyRunnerCfg
 
@@ -126,6 +153,15 @@ def main():
     else:
         agent_cfg_dict = agent_cfg.to_dict()
 
+    # isolate the two staircases so that the saved heatmaps compare ascending vs descending
+    attention_staircase = False
+    if args_cli.attention_heatmap:
+        attention_staircase = attention_heatmap.configure_staircase_terrains(env_cfg)
+        if attention_staircase:
+            print("[ATTENTION] Restricted the terrain to the upstairs/downstairs staircases (one environment each).")
+        else:
+            print("[ATTENTION] No staircase terrains for this task; recording the environments as configured.")
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     # wrap for video recording
@@ -158,8 +194,14 @@ def main():
     # wrap around environment for instinct-rl
     env = InstinctRlVecEnvWrapper(env)
 
-    # load previously trained model
-    ppo_runner = OnPolicyRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
+    attention_terrain_level = None
+    if attention_staircase:
+        attention_terrain_level = attention_heatmap.move_envs_to_hardest_terrain(env)
+
+    # load previously trained model. `runner_class_name` defaults to OnPolicyRunner, so existing
+    # configs are unaffected; a distillation config needs DistillationRunner for its own checks.
+    runner_class = getattr(instinct_rl_runners, agent_cfg_dict.get("runner_class_name", "OnPolicyRunner"))
+    ppo_runner = runner_class(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
     if agent_cfg.load_run is not None:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         ppo_runner.load(resume_path)
@@ -169,6 +211,34 @@ def main():
         policy = ppo_runner.alg.actor_critic.act
     else:
         policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+
+    # set up the cross-attention heatmap recorder
+    attention_recorder = None
+    if args_cli.attention_heatmap:
+        if attention_staircase:
+            env_ids = list(range(env.num_envs))
+            labels = attention_heatmap.staircase_labels(env)
+            title_context = f"hardest level {attention_terrain_level}"
+        else:
+            env_ids = list(range(min(env.num_envs, args_cli.attention_max_envs)))
+            labels = None
+            title_context = ""
+        attention_recorder = attention_heatmap.AttentionHeatmapRecorder(
+            env,
+            ppo_runner.alg.actor_critic,
+            output_dir=args_cli.attention_output_dir or os.path.join(log_dir, "attention_heatmaps"),
+            interval=args_cli.attention_interval,
+            env_ids=env_ids,
+            labels=labels,
+            depth_obs_name=args_cli.attention_depth_obs,
+            title_context=title_context,
+        )
+        max_episode_steps = int(env.unwrapped.max_episode_length)
+        print(
+            f"[ATTENTION] Monitoring {attention_recorder.head_name} on envs {env_ids}. Saving every"
+            f" {args_cli.attention_interval} steps to {attention_recorder.output_dir} (~"
+            f"{(max_episode_steps - 1) // args_cli.attention_interval + 1} images per full episode/environment)."
+        )
 
     # export policy to onnx/jit
     if agent_cfg.load_run is not None:
@@ -195,11 +265,20 @@ def main():
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            # plot the attention weights of the forward pass we just ran
+            if attention_recorder is not None:
+                attention_recorder.save_due_heatmaps(obs)
             if timestep < args_cli.zero_act_until:
                 actions[:] = 0.0
             # env stepping
             obs, rewards, dones, infos = env.step(actions)
+            if attention_recorder is not None:
+                attention_recorder.step(dones)
         timestep += 1
+
+        if attention_recorder is not None and attention_recorder.finished:
+            print("[ATTENTION] Saved the first episode of every recorded environment; stopping play.")
+            break
 
         # override reward terms if auxiliary reward is enabled
         if args_cli.aux_reward:

@@ -236,6 +236,79 @@ class InstinctRlPpoAlgorithmCfg:
 
 
 @configclass
+class InstinctRlDistillationAlgorithmCfg:
+    """Configuration for the Distillation algorithm (behaviour cloning, no RL stage).
+
+    Deliberately *not* a subclass of :class:`InstinctRlPpoAlgorithmCfg`. Distillation has no
+    critic, no GAE and no surrogate, so ``value_loss_coef`` / ``clip_param`` / ``gamma`` / ``lam``
+    / ``desired_kl`` / ``num_learning_epochs`` / ``num_mini_batches`` mean nothing to it -- and
+    since the algorithm now rejects unknown config keys rather than warning, inheriting them
+    would make every run fail at construction. The fields below are exactly its signature.
+    """
+
+    class_name: str = "Distillation"
+
+    # -- teacher
+    teacher_logdir: str = MISSING
+    """Run directory of the teacher. Required unless ``allow_random_teacher`` is set."""
+
+    teacher_checkpoint: str | None = None
+    """Checkpoint file name inside ``teacher_logdir``, or an absolute path. None = latest."""
+
+    teacher_policy_class_name: str = MISSING
+    teacher_policy: dict = MISSING
+    """The teacher's own policy config, including its ``obs_format``."""
+
+    teacher_obs_source: str = "critic"
+    """Which observation group of *this* env feeds the teacher's actor."""
+
+    allow_random_teacher: bool = False
+    """Opt in to an untrained teacher. Its labels are meaningless; the loss curve still looks fine."""
+
+    warm_start_from_teacher: bool = False
+    """Seed the student with the teacher's memory/actor weights, leaving only the exteroceptive
+    encoder and the action std to be learned.
+
+    Requires teacher and student to be architecturally identical apart from that encoder. Without
+    it, a student-only rollout cold-starts from a state distribution consisting entirely of
+    falling, since the policy cannot produce anything else until it can walk.
+    """
+
+    # -- loss
+    loss_type: str = "mse_sum"
+    """``mse_sum`` is squared L2 summed over the action dim -- the usual behaviour-cloning form."""
+
+    # -- optimisation
+    gradient_length: int = 24
+    """TBPTT chunk length in environment steps. Decoupled from ``num_steps_per_env``."""
+
+    normalize_accumulated_loss: bool = True
+    flush_tail: bool = True
+
+    accumulate_gradients: bool = False
+    """Accumulate every chunk's gradient into a single clipped optimizer step per rollout."""
+
+    learning_rate: float = 3.0e-4
+    max_grad_norm: float | None = 1.0
+    optimizer_class_name: str = "Adam"
+    freeze_action_std: bool = True
+
+    ema_decay: float | None = None
+    """EMA of the student weights, checkpointed as the deployable model. None disables."""
+
+    # -- recurrent bookkeeping
+    refresh_hidden_after_update: bool = False
+    """Replay the rollout once more under no_grad with the post-update weights to regenerate
+    the carry handed to the next rollout."""
+
+    # -- lr schedule
+    lr_scheduler_class_name: str | None = None
+    lr_scheduler: dict = {}
+    lr_scheduler_step_unit: str = "optimizer_step"
+    """``optimizer_step`` or ``update``. Under ``accumulate_gradients`` the two coincide."""
+
+
+@configclass
 class InstinctRlNormalizerCfg:
     class_name: str = "EmpiricalNormalization"
 
@@ -249,6 +322,13 @@ class InstinctRlOnPolicyRunnerCfg:
 
     device: str = "cuda:0"
     """The device for the rl-agent. Default is cuda:0."""
+
+    runner_class_name: str = "OnPolicyRunner"
+    """Which runner in ``instinct_rl.runners`` drives training.
+
+    ``DistillationRunner`` adds the distillation-specific construction checks (double
+    normalization of the teacher's observation group, a silently dropped TBPTT tail).
+    """
 
     num_steps_per_env: int = MISSING
     """The number of steps per environment per update."""
