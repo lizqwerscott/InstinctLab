@@ -228,23 +228,48 @@ class delayed_visualizable_image(ManagerTermBase):
 
 
 def height_scan_feat(
-    env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("height_scanner_critic"), offset: float = 0.5
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("height_scanner_critic"),
+    offset: float = 0.5,
+    noise: bool = False,
 ) -> torch.Tensor:
-    """Height scan feature from a ray caster sensor, encoded using a pre-trained VAE encoder.
+    """Height scan feature from a ray caster sensor.
 
     Args:
         env: The environment object.
         sensor_cfg: The configuration of the height scanner sensor.
         offset: Offset to subtract from the height values. Defaults to 0.5.
+        noise: Whether to add per-ray measurement noise and a per-env constant
+            sensor initialization error to the height values. Defaults to False.
 
     Returns:
-        The encoded height scan features of shape (num_envs, 3136).
+        The height scan features of shape (num_envs, num_rays).
     """
     # Get height scanner data
     height_scanner = env.scene.sensors[sensor_cfg.name]
 
     # Compute height scan: sensor_height - hit_z - offset
     scan_data = height_scanner.data.pos_w[:, 2].unsqueeze(1) - height_scanner.data.ray_hits_w[..., 2] - offset
+
+    if noise:
+        # Clean NaN/Inf before applying noise
+        scan_data = torch.nan_to_num(scan_data)
+
+        num_envs = scan_data.shape[0]
+        # Per-env constant offset buffer (simulates sensor initialization error)
+        if getattr(env, "_height_scan_offset", None) is None or env._height_scan_offset.shape != (num_envs, 1):
+            env._height_scan_offset = torch.zeros((num_envs, 1), device=env.device)
+
+        # Resample offset on reset: uniform [-0.05, 0.05]
+        if hasattr(env, "reset_buf"):
+            reset_env_ids = env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+            if len(reset_env_ids) > 0:
+                env._height_scan_offset[reset_env_ids] = torch.rand((len(reset_env_ids), 1), device=env.device) * 0.1 - 0.05
+
+        # Per-ray independent Gaussian height noise (std 3cm)
+        scan_data = scan_data + torch.randn_like(scan_data) * 0.03
+        # Global per-env constant offset (sensor initialization error)
+        scan_data = scan_data + env._height_scan_offset
 
     # Clamp the height scan data to the range [-5, 5]
     scan_data = torch.clamp(scan_data, min=-5.0, max=5.0)

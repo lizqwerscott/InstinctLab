@@ -20,7 +20,6 @@ from isaaclab.sensors.ray_caster.patterns import PinholeCameraPatternCfg
 from isaaclab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import instinctlab.envs.mdp as instinct_mdp
@@ -447,9 +446,9 @@ class ObservationsCfg:
         last_action = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
         height_scan = ObsTerm(
             func=mdp.height_scan_feat,
-            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
+            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner"), "noise": True},
             history_length=4,
-            noise=Gnoise(mean=0.0, std=0.05),
+            noise=None,
         )
 
         def __post_init__(self):
