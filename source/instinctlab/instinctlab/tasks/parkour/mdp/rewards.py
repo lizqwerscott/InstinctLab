@@ -434,6 +434,7 @@ class FootholdReward(ManagerTermBase):
         self._last_W_nom_right = None
         self._last_h_center = None  # (N,) center patch height for stair height line
         self._last_h_fwd = None  # (N,) forward patch height for stair height line
+        self._last_dcm_target_world = None  # (N, 3) DCM target (ξ_T − b_nom) in world frame
 
         # ------------------------------------------------------------------
 
@@ -460,6 +461,36 @@ class FootholdReward(ManagerTermBase):
             )
             self._bezier_vis = VisualizationMarkers(bezier_vis_cfg)
             self._bezier_vis.set_visibility(True)
+
+            # --- DCM target markers (magenta sphere at ξ_T − b_nom) ---
+            dcm_vis_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/DCMTerminalPoint",
+                markers={
+                    "dcm": sim_utils.SphereCfg(
+                        radius=0.06,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 1.0)),
+                    ),
+                },
+            )
+            self._dcm_vis = VisualizationMarkers(dcm_vis_cfg)
+            self._dcm_vis.set_visibility(True)
+
+            # --- Bezier midpoint markers (cyan = left, yellow = right) ---
+            bezier_mid_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/BezierMidpoint",
+                markers={
+                    "left": sim_utils.SphereCfg(
+                        radius=0.05,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 1.0)),
+                    ),
+                    "right": sim_utils.SphereCfg(
+                        radius=0.05,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0)),
+                    ),
+                },
+            )
+            self._bezier_mid_vis = VisualizationMarkers(bezier_mid_cfg)
+            self._bezier_mid_vis.set_visibility(True)
 
     def __call__(
         self,
@@ -671,6 +702,33 @@ class FootholdReward(ManagerTermBase):
             self._last_L_nom = self._channels_left["L_nom"]  # (N, 1, 1)
             self._last_W_nom_left = self._channels_left["W_nom"]  # (N, 1, 1)  swing_leg_sign=+1 → +lp
             self._last_W_nom_right = self._channels_right["W_nom"]  # (N, 1, 1)  swing_leg_sign=-1 → -lp
+
+            # ---- DCM target point (ξ_T − b_nom): merge per actual swing foot, world frame ----
+            xi_T_left = self._channels_left["xi_T"]  # (N, 2) pelvis-local xy
+            xi_T_right = self._channels_right["xi_T"]  # (N, 2) pelvis-local xy
+            b_nom_left = self._channels_left["b_nom"]  # (N, 2) pelvis-local xy
+            b_nom_right = self._channels_right["b_nom"]  # (N, 2) pelvis-local xy
+            # Left in contact → right is swing → use the right-swing plan (and vice versa)
+            xi_T_local = torch.where(in_contact[:, 0:1], xi_T_right, xi_T_left)  # (N, 2)
+            b_nom_local = torch.where(in_contact[:, 0:1], b_nom_right, b_nom_left)  # (N, 2)
+            dcm_target_local = xi_T_local - b_nom_local  # (N, 2)
+            # Sample terrain height at the DCM xy from the local heightmap for z
+            cell_size = self._planner.cell_size
+            g_w, g_h = self._planner.grid_w, self._planner.grid_h
+            ix = (dcm_target_local[:, 0] / cell_size + (g_w - 1) / 2).round().long().clamp(0, g_w - 1)
+            iy = (dcm_target_local[:, 1] / cell_size + (g_h - 1) / 2).round().long().clamp(0, g_h - 1)
+            h_idx = torch.arange(env.num_envs, device=heightmap.device)
+            terrain_z = torch.where(
+                torch.isnan(heightmap[h_idx, iy, ix]),
+                torch.zeros(env.num_envs, device=heightmap.device),
+                heightmap[h_idx, iy, ix],
+            )  # (N,) pelvis-local
+            q_conj = root_quat.clone()
+            q_conj[:, 1:] *= -1.0
+            dcm_target_local3 = torch.stack(
+                [dcm_target_local[:, 0], dcm_target_local[:, 1], terrain_z], dim=-1
+            )  # (N, 3)
+            self._last_dcm_target_world = quat_apply_inverse(q_conj, dcm_target_local3) + root_pos  # (N, 3)
 
         # ---- 4. Reward components (proximity + bezier, weighted internally) ----
         # ---- 4a. Swing-phase level (touchdown edge already computed in 2a) ---
@@ -1113,6 +1171,54 @@ class FootholdReward(ManagerTermBase):
             else:
                 clear_markers(self._bezier_vis, self._planner.device)
 
+        # ---- DCM target point (magenta sphere at ξ_T − b_nom) ----
+        if hasattr(self, "_dcm_vis") and self._dcm_vis is not None:
+            if self._last_dcm_target_world is not None:
+                vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+                if vis_mask is not None:
+                    poses = self._last_dcm_target_world[vis_mask]
+                else:
+                    poses = self._last_dcm_target_world
+                if poses.shape[0] > 0:
+                    self._dcm_vis.visualize(
+                        translations=poses,
+                        marker_indices=torch.zeros(poses.shape[0], dtype=torch.int, device=poses.device),
+                    )
+                else:
+                    clear_markers(self._dcm_vis, self._planner.device)
+            else:
+                clear_markers(self._dcm_vis, self._planner.device)
+
+        # ---- Bezier midpoint markers (curve point at u = 0.5 for active swing feet) ----
+        if hasattr(self, "_bezier_mid_vis") and self._bezier_mid_vis is not None:
+            vis_mask = self._terrain_mask if self._terrain_mask is not None else None
+            mid_poses = []
+            mid_indices = []
+            for foot_idx in range(2):
+                if vis_mask is not None:
+                    foot_active = vis_mask & self._swing_planned[:, foot_idx]
+                else:
+                    foot_active = self._swing_planned[:, foot_idx]
+                active_ids = foot_active.nonzero(as_tuple=True)[0]
+                if active_ids.numel() == 0:
+                    continue
+                P0 = self._lift_off_pos[active_ids, foot_idx]
+                P1 = self._apex_cache[active_ids, foot_idx]
+                P2 = self._p_star_cache[active_ids, foot_idx]
+                # Bezier(0.5) = 0.25·P0 + 0.5·P1 + 0.25·P2
+                p_mid = 0.25 * P0 + 0.5 * P1 + 0.25 * P2  # (M, 3)
+                mid_poses.append(p_mid)
+                mid_indices.append(
+                    torch.full((p_mid.shape[0],), foot_idx, dtype=torch.int, device=p_mid.device)
+                )
+            if mid_poses:
+                self._bezier_mid_vis.visualize(
+                    translations=torch.cat(mid_poses, dim=0),
+                    marker_indices=torch.cat(mid_indices, dim=0),
+                )
+            else:
+                clear_markers(self._bezier_mid_vis, self._planner.device)
+
     # ------------------------------------------------------------------
 
     def reset(self, env_ids: torch.Tensor | None = None):
@@ -1141,6 +1247,7 @@ class FootholdReward(ManagerTermBase):
         self._last_h_center = None
         self._last_h_fwd = None
         self._last_fwd_dist = None
+        self._last_dcm_target_world = None
 
     # ------------------------------------------------------------------
 

@@ -215,8 +215,9 @@ class DCMFootholdPlanner:
         """Compute all intermediate cost channels.
 
         Returns dict with keys:
-            Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
-        each of shape (N, H, W) except valid (bool).
+            Q, E, M, b, d_pos, d_dcm, J, valid, h_safe, L_nom, W_nom, xi_T, b_nom
+        each of shape (N, H, W) except valid (bool), L_nom/W_nom (N,1,1),
+        and xi_T/b_nom (N, 2) pelvis-local (only when CoM state was given).
         """
         N = heightmap.shape[0]
         H, W = self.grid_h, self.grid_w
@@ -365,6 +366,17 @@ class DCMFootholdPlanner:
 
         d_dcm = (xi_T_x - gx_map - bx_map) ** 2 + (xi_T_y - gy_map - by_map) ** 2
 
+        # ---- Terminal DCM point (pelvis-local xy, (N, 2)) for debug visualisation ----
+        # Only defined when CoM state was provided (xi_T_x/y are (N,1,1) there);
+        # falls back to zeros in the (N,H,W) grid-map branch, which has no single point.
+        if xi_T_x.dim() == 3 and xi_T_x.shape[1] == 1:
+            xi_T = torch.stack([xi_T_x.squeeze(1).squeeze(1), xi_T_y.squeeze(1).squeeze(1)], dim=-1)
+        else:
+            xi_T = torch.zeros(N, 2, device=device, dtype=heightmap.dtype)
+
+        # ---- Nominal DCM offset b_nom (pelvis-local xy, (N, 2)) for debug visualisation ----
+        b_nom = torch.stack([bx_map.squeeze(-1).squeeze(-1), by_map.squeeze(-1).squeeze(-1)], dim=-1)
+
         # =================================================================
         # Total cost (Eq. 1)
         # =================================================================
@@ -391,6 +403,8 @@ class DCMFootholdPlanner:
             "h_safe": h_safe,
             "L_nom": L_nom,
             "W_nom": W_nom,
+            "xi_T": xi_T,
+            "b_nom": b_nom,
         }
 
     # -----------------------------------------------------------------------
