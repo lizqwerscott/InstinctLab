@@ -576,7 +576,7 @@ class FootholdReward(ManagerTermBase):
                     p_new = self._planner.plan_in_world(
                         heightmap[mask],
                         v_cmd[mask],
-                        body_pos[mask, 1],
+                        foot_center[mask, 1],
                         root_pos[mask],
                         root_quat[mask],
                         torch.ones(mask.sum(), device=env.device),
@@ -589,7 +589,7 @@ class FootholdReward(ManagerTermBase):
                     p_new = self._planner.plan_in_world(
                         heightmap[mask],
                         v_cmd[mask],
-                        body_pos[mask, 0],
+                        foot_center[mask, 0],
                         root_pos[mask],
                         root_quat[mask],
                         -torch.ones(mask.sum(), device=env.device),
@@ -638,7 +638,7 @@ class FootholdReward(ManagerTermBase):
             ) = self._planner.plan_with_channels_in_world(
                 heightmap,
                 v_cmd,
-                body_pos[:, 1],
+                foot_center[:, 1],
                 root_pos,
                 root_quat,
                 torch.ones(env.num_envs, device=env.device),
@@ -652,7 +652,7 @@ class FootholdReward(ManagerTermBase):
             ) = self._planner.plan_with_channels_in_world(
                 heightmap,
                 v_cmd,
-                body_pos[:, 0],
+                foot_center[:, 0],
                 root_pos,
                 root_quat,
                 -torch.ones(env.num_envs, device=env.device),
