@@ -10,7 +10,7 @@ import torch
 from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_apply, quat_apply_inverse
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_apply_yaw
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -226,8 +226,11 @@ class FootholdReward(ManagerTermBase):
         self._sensor_cfg = cfg.params["sensor_cfg"]
         self._heightmap_sensor_cfg = cfg.params["heightmap_sensor_cfg"]
 
-        # 踝关节到脚掌中心的偏移量（沿脚部前向 +x），可配置参数
-        self._ankle_offset = cfg.params.get("ankle_offset", 0.035)
+        # Ankle-roll link origin to the foot-center reference point in foot-local coordinates.
+        self._foot_center_offset = torch.tensor(
+            cfg.params.get("foot_center_offset", (0.035, 0.0, -0.058)),
+            device=env.device,
+        )
 
         # ---- Bézier swing trajectory params (paper Table 1) ----
         self._T_swing = cfg.params.get("T_swing", 0.45)
@@ -482,7 +485,7 @@ class FootholdReward(ManagerTermBase):
         heightmap_sensor_cfg: SceneEntityCfg | None = None,
         asset_cfg: SceneEntityCfg | None = None,
         sensor_cfg: SceneEntityCfg | None = None,
-        ankle_offset: float | None = None,
+        foot_center_offset: tuple[float, float, float] | None = None,
         edge_hold_time: float | None = None,
         edge_window: float | None = None,
         terrain_names: list[str] | None = None,
@@ -501,13 +504,13 @@ class FootholdReward(ManagerTermBase):
         # ---- 1. Foot positions & contact (raw) --------------------------
         ankle_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3) — ankle
         body_quat = asset.data.body_quat_w[:, self._asset_cfg.body_ids]  # (N, 2, 4) — foot orientation
-        # 将踝关节位置偏移到脚掌中心（沿脚部局部 +x 方向）
-        ankle_offset_v = torch.tensor([self._ankle_offset, 0.0, 0.0], device=env.device)
+        # Convert the ankle-roll link origin to the sole reference point.
+        foot_center_offset_v = self._foot_center_offset.to(dtype=body_quat.dtype)
         offset_w = quat_apply(
             body_quat.reshape(-1, 4),
-            ankle_offset_v.unsqueeze(0).expand(body_quat.shape[0] * body_quat.shape[1], -1),
+            foot_center_offset_v.unsqueeze(0).expand(body_quat.shape[0] * body_quat.shape[1], -1),
         ).reshape(-1, 2, 3)
-        foot_center = ankle_pos + offset_w  # (N, 2, 3) — foot center
+        foot_center = ankle_pos + offset_w  # (N, 2, 3) — sole reference point
 
         contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
         net_force = contact_sensor.data.net_forces_w_history  # (N, hist, n_bodies_all)
@@ -536,7 +539,9 @@ class FootholdReward(ManagerTermBase):
         # ---- 3. Common quantities (shared by planning & reward) ----------
         root_pos = asset.data.root_pos_w  # (N, 3)
         root_quat = asset.data.root_quat_w  # (N, 4) w,x,y,z
-        v_cmd = env.command_manager.get_command("base_velocity")[:, :2]  # (N, 2) world
+        # base_velocity's planar components are already expressed in the
+        # yaw-aligned body frame used by the heightmap and DCM grid.
+        v_cmd_yaw_local = env.command_manager.get_command("base_velocity")[:, :2]
         heightmap = self._get_heightmap(env, root_pos)  # (N, 25, 37)
 
         # Approximate CoM state from root (pelvis) state.
@@ -575,7 +580,7 @@ class FootholdReward(ManagerTermBase):
                 if foot_idx == 0:  # left foot
                     p_new = self._planner.plan_in_world(
                         heightmap[mask],
-                        v_cmd[mask],
+                        v_cmd_yaw_local[mask],
                         foot_center[mask, 1],
                         root_pos[mask],
                         root_quat[mask],
@@ -588,7 +593,7 @@ class FootholdReward(ManagerTermBase):
                 else:  # right foot
                     p_new = self._planner.plan_in_world(
                         heightmap[mask],
-                        v_cmd[mask],
+                        v_cmd_yaw_local[mask],
                         foot_center[mask, 0],
                         root_pos[mask],
                         root_quat[mask],
@@ -637,7 +642,7 @@ class FootholdReward(ManagerTermBase):
                 self._channels_left,
             ) = self._planner.plan_with_channels_in_world(
                 heightmap,
-                v_cmd,
+                v_cmd_yaw_local,
                 foot_center[:, 1],
                 root_pos,
                 root_quat,
@@ -651,7 +656,7 @@ class FootholdReward(ManagerTermBase):
                 self._channels_right,
             ) = self._planner.plan_with_channels_in_world(
                 heightmap,
-                v_cmd,
+                v_cmd_yaw_local,
                 foot_center[:, 0],
                 root_pos,
                 root_quat,
@@ -684,8 +689,12 @@ class FootholdReward(ManagerTermBase):
             td_mask = touchdown_active[:, foot_idx]  # (N,)
 
             # ---- 4c-i. Dense reward: Bézier per-frame tracking --------------------
-            # --- Tracking reward for currently-swinging feet ----------
-            tracking_mask = is_swinging[:, foot_idx] & self._swing_planned[:, foot_idx]
+            # --- Tracking reward during the planned swing duration ----------
+            tracking_mask = (
+                is_swinging[:, foot_idx]
+                & self._swing_planned[:, foot_idx]
+                & (self._swing_elapsed[:, foot_idx] <= self._T_swing)
+            )
             if tracking_mask.any():
                 # Quintic-smoothstep time warping (zero endpoint vel/acc).
                 u_time_clamped = (self._swing_elapsed[tracking_mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)
@@ -987,10 +996,7 @@ class FootholdReward(ManagerTermBase):
                 # Nominal foothold in pelvis-local frame
                 nominal_local = torch.stack([L_nom_flat, W_nom_flat, terrain_z], dim=-1)  # (N, 3)
 
-                # Convert to world frame (same rotation as plan_with_channels_in_world)
-                q_conj = self._last_root_quat.clone()
-                q_conj[:, 1:] *= -1.0
-                nominal_world = quat_apply_inverse(q_conj, nominal_local) + self._last_root_pos  # (N, 3)
+                nominal_world = quat_apply_yaw(self._last_root_quat, nominal_local) + self._last_root_pos  # (N, 3)
 
                 # Apply terrain mask
                 if vis_mask is not None:
@@ -1029,17 +1035,15 @@ class FootholdReward(ManagerTermBase):
                     root_pos_v = self._last_root_pos
                     root_quat_v = self._last_root_quat
 
-                q_conj = root_quat_v.clone()
-                q_conj[:, 1:] *= -1.0
-                fwd_xy_w = quat_apply_inverse(q_conj, fwd_local) + root_pos_v
+                fwd_xy_w = quat_apply_yaw(root_quat_v, fwd_local) + root_pos_v
 
                 # Bottom at forward terrain height, top at forward terrain + step_height.
                 # This ensures the line sits on the actual terrain at its XY position
                 # instead of piercing through the ground when going up stairs.
                 bottom_w = fwd_xy_w.clone()
-                bottom_w[:, 2] = h_f
+                bottom_w[:, 2] = root_pos_v[:, 2] + h_f
                 top_w = fwd_xy_w.clone()
-                top_w[:, 2] = h_f + (h_f - h_c)  # = 2*h_f - h_c
+                top_w[:, 2] = root_pos_v[:, 2] + h_f + (h_f - h_c)  # = 2*h_f - h_c
 
                 dir_w = top_w - bottom_w
                 len_w = torch.norm(dir_w, dim=-1)

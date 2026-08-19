@@ -18,7 +18,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from isaaclab.utils.math import quat_apply_inverse, quat_apply_yaw
+from isaaclab.utils.math import quat_apply_inverse, quat_apply_yaw, yaw_quat
 
 
 # ---------------------------------------------------------------------------
@@ -440,16 +440,18 @@ class DCMFootholdPlanner:
         p_star_y = self.grid_y[i, j]
         p_star_z = h_safe[torch.arange(N, device=self.device), i, j]
 
-        # Low-velocity override (paper S3.2 fallback)
+        # Low-velocity and no-valid-cell fallback.
         low_speed = vx_abs < self.v_min
-        p_star_x = torch.where(low_speed, stance_xyz_local[:, 0], p_star_x)
-        p_star_y = torch.where(low_speed, stance_xyz_local[:, 1], p_star_y)
-        p_star_z = torch.where(low_speed, stance_xyz_local[:, 2], p_star_z)
+        has_valid_cell = torch.isfinite(J_flat).any(dim=-1)
+        use_stance_fallback = low_speed | ~has_valid_cell
+        p_star_x = torch.where(use_stance_fallback, stance_xyz_local[:, 0], p_star_x)
+        p_star_y = torch.where(use_stance_fallback, stance_xyz_local[:, 1], p_star_y)
+        p_star_z = torch.where(use_stance_fallback, stance_xyz_local[:, 2], p_star_z)
 
         p_star = torch.stack([p_star_x, p_star_y, p_star_z], dim=-1)
 
-        # For low-speed envs, mark best_idx as invalid (set to -1)
-        best_idx = torch.where(low_speed, -1, best_idx)
+        # Fallbacks have no selected heightmap cell.
+        best_idx = torch.where(use_stance_fallback, -1, best_idx)
 
         return p_star, best_idx
 
@@ -484,7 +486,7 @@ class DCMFootholdPlanner:
     def plan_with_channels_in_world(
         self,
         heightmap: torch.Tensor,  # (N, H, W) pelvis-local heights
-        v_cmd: torch.Tensor,  # (N, 2) world-frame velocity
+        v_cmd_yaw_local: torch.Tensor,  # (N, 2) yaw-local commanded velocity
         stance_xyz_world: torch.Tensor,  # (N, 3) stance foot world pos
         root_pos_w: torch.Tensor,  # (N, 3) pelvis world pos
         root_quat_w: torch.Tensor,  # (N, 4) pelvis world quat (w,x,y,z)
@@ -493,32 +495,27 @@ class DCMFootholdPlanner:
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute best foothold in world frame + return all cost channels.
+        """Compute a world-frame foothold from yaw-local velocity and return cost channels.
 
         Returns (p_world, channels) where channels has keys:
             Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
         all in pelvis-local frame (shape N, H, W).
         """
-        N = root_pos_w.shape[0]
-        zeros1 = torch.zeros(N, 1, device=root_pos_w.device, dtype=root_pos_w.dtype)
+        root_yaw_quat_w = yaw_quat(root_quat_w)
 
-        # -- Velocity: world -> pelvis-local --
-        v_3d = torch.cat([v_cmd, zeros1], dim=-1)
-        v_local = quat_apply_inverse(root_quat_w, v_3d)[:, :2]
-
-        # -- Stance foot: world -> pelvis-local --
-        stance_local = quat_apply_inverse(root_quat_w, stance_xyz_world - root_pos_w)
+        # -- Stance foot: world -> yaw-local --
+        stance_local = quat_apply_inverse(root_yaw_quat_w, stance_xyz_world - root_pos_w)
 
         # -- CoM: world -> pelvis-local (optional) --
         com_local = com_vel_local = None
         if com_pos_w is not None and com_vel_w is not None:
-            com_local = quat_apply_inverse(root_quat_w, com_pos_w - root_pos_w)[:, :2]
-            com_vel_local = quat_apply_inverse(root_quat_w, com_vel_w)[:, :2]
+            com_local = quat_apply_inverse(root_yaw_quat_w, com_pos_w - root_pos_w)[:, :2]
+            com_vel_local = quat_apply_inverse(root_yaw_quat_w, com_vel_w)[:, :2]
 
         # -- Plan in pelvis-local frame --
         p_local, channels = self.plan_with_channels(
             heightmap,
-            v_local,
+            v_cmd_yaw_local,
             stance_local,
             swing_leg_sign,
             com_local,
@@ -526,19 +523,17 @@ class DCMFootholdPlanner:
             k=k,
         )
 
-        # -- Rotate back: pelvis-local -> world --
-        q_conj = root_quat_w.clone()
-        q_conj[:, 1:] *= -1.0
-        p_world = quat_apply_inverse(q_conj, p_local) + root_pos_w
+        # -- Rotate back: yaw-local -> world --
+        p_world = quat_apply_yaw(root_quat_w, p_local) + root_pos_w
         return p_world, channels
 
     # -----------------------------------------------------------------------
-    # Convenience: world-frame input / output
+    # Convenience: world-frame positions, yaw-local velocity
     # -----------------------------------------------------------------------
     def plan_in_world(
         self,
         heightmap: torch.Tensor,  # (N, H, W) pelvis-local heights
-        v_cmd: torch.Tensor,  # (N, 2) world-frame velocity
+        v_cmd_yaw_local: torch.Tensor,  # (N, 2) yaw-local commanded velocity
         stance_xyz_world: torch.Tensor,  # (N, 3) stance foot world pos
         root_pos_w: torch.Tensor,  # (N, 3) pelvis world pos
         root_quat_w: torch.Tensor,  # (N, 4) pelvis world quat (w,x,y,z)
@@ -547,27 +542,22 @@ class DCMFootholdPlanner:
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
     ) -> torch.Tensor:
-        """Compute best foothold in world frame."""
-        N = root_pos_w.shape[0]
-        zeros1 = torch.zeros(N, 1, device=root_pos_w.device, dtype=root_pos_w.dtype)
+        """Compute a world-frame foothold from yaw-local velocity."""
+        root_yaw_quat_w = yaw_quat(root_quat_w)
 
-        # -- Velocity: world -> pelvis-local --
-        v_3d = torch.cat([v_cmd, zeros1], dim=-1)
-        v_local = quat_apply_inverse(root_quat_w, v_3d)[:, :2]
-
-        # -- Stance foot: world -> pelvis-local --
-        stance_local = quat_apply_inverse(root_quat_w, stance_xyz_world - root_pos_w)
+        # -- Stance foot: world -> yaw-local --
+        stance_local = quat_apply_inverse(root_yaw_quat_w, stance_xyz_world - root_pos_w)
 
         # -- CoM: world -> pelvis-local (optional) --
         com_local = com_vel_local = None
         if com_pos_w is not None and com_vel_w is not None:
-            com_local = quat_apply_inverse(root_quat_w, com_pos_w - root_pos_w)[:, :2]
-            com_vel_local = quat_apply_inverse(root_quat_w, com_vel_w)[:, :2]
+            com_local = quat_apply_inverse(root_yaw_quat_w, com_pos_w - root_pos_w)[:, :2]
+            com_vel_local = quat_apply_inverse(root_yaw_quat_w, com_vel_w)[:, :2]
 
         # -- Plan in pelvis-local frame --
         p_local = self.plan(
             heightmap,
-            v_local,
+            v_cmd_yaw_local,
             stance_local,
             swing_leg_sign,
             com_local,

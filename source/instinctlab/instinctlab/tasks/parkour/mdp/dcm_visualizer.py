@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sim import CuboidCfg, PreviewSurfaceCfg
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply_yaw
 
 
 def clear_markers(visualizer: VisualizationMarkers, device):
@@ -193,11 +193,9 @@ class DCMCostVisualizer:
         gy_all = self._gy.unsqueeze(0).expand(M, HW)
         local_pos = torch.stack([gx_all, gy_all, z_flat + 0.5], dim=-1)  # (M, HW, 3)
 
-        # Rotate pelvis-local -> world for every cell in one batched call.
-        q_conj = root_quat_w.clone()
-        q_conj[:, 1:] *= -1.0
-        q_cells = q_conj[:, None, :].expand(M, HW, 4).reshape(-1, 4)
-        world_pos = quat_apply_inverse(q_cells, local_pos.reshape(-1, 3))
+        # Rotate yaw-local -> world for every cell in one batched call.
+        q_cells = root_quat_w[:, None, :].expand(M, HW, 4).reshape(-1, 4)
+        world_pos = quat_apply_yaw(q_cells, local_pos.reshape(-1, 3))
         world_pos = world_pos.reshape(M, HW, 3) + root_pos_w[:, None, :]  # (M, HW, 3)
 
         # Gather only valid cells into a flat marker array.
@@ -217,7 +215,7 @@ class DCMCostVisualizer:
                 sel_local = torch.stack(
                     [self._gx[bi], self._gy[bi], sel_z + 0.5], dim=-1
                 )                                     # (M, 3)
-                sel_world = quat_apply_inverse(q_conj, sel_local) + root_pos_w
+                sel_world = quat_apply_yaw(root_quat_w, sel_local) + root_pos_w
                 sel_world = sel_world[ok]             # (L, 3)
 
         if world_pos_v.shape[0] == 0 and (

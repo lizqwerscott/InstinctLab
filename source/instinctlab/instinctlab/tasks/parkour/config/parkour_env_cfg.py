@@ -806,7 +806,7 @@ class G1Rewards:
             "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "ankle_offset": 0.035,
+            "foot_center_offset": (0.035, 0.0, -0.058),
             # 接触边沿去抖 (替代 EMA): 连续离地/接触 ≥ edge_hold_time 才触发事件,
             #   且 < edge_window 保证单次触发 (延迟 2-3 控制步, 免疫 <25ms 毛刺)
             "edge_hold_time": 0.025,
