@@ -422,7 +422,7 @@ class FootholdReward(ManagerTermBase):
             self._event_timer = torch.zeros(env.num_envs, 4, dtype=torch.int, device=env.device)
 
         # --- Cached frame data for _debug_vis_callback (always allocated) ---
-        self._last_body_pos = torch.zeros(env.num_envs, 2, 3, device=env.device)
+        self._last_foot_center = torch.zeros(env.num_envs, 2, 3, device=env.device)
         self._last_contact = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
         self._last_touchdown = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
         self._last_swing_onset = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
@@ -499,7 +499,7 @@ class FootholdReward(ManagerTermBase):
         asset = env.scene[self._asset_cfg.name]
 
         # ---- 1. Foot positions & contact (raw) --------------------------
-        body_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3) — ankle
+        ankle_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3) — ankle
         body_quat = asset.data.body_quat_w[:, self._asset_cfg.body_ids]  # (N, 2, 4) — foot orientation
         # 将踝关节位置偏移到脚掌中心（沿脚部局部 +x 方向）
         ankle_offset_v = torch.tensor([self._ankle_offset, 0.0, 0.0], device=env.device)
@@ -507,7 +507,7 @@ class FootholdReward(ManagerTermBase):
             body_quat.reshape(-1, 4),
             ankle_offset_v.unsqueeze(0).expand(body_quat.shape[0] * body_quat.shape[1], -1),
         ).reshape(-1, 2, 3)
-        foot_center = body_pos + offset_w  # (N, 2, 3) — foot center
+        foot_center = ankle_pos + offset_w  # (N, 2, 3) — foot center
 
         contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
         net_force = contact_sensor.data.net_forces_w_history  # (N, hist, n_bodies_all)
@@ -762,7 +762,7 @@ class FootholdReward(ManagerTermBase):
         # (边沿检测为无状态窗口触发, 无需持久化上一帧接触状态)
 
         # ---- 4e. Cache frame data for _debug_vis_callback -----------------
-        self._last_body_pos = foot_center.clone()
+        self._last_foot_center = foot_center.clone()
         self._last_contact = in_contact.clone()
         self._last_touchdown = touchdown_active.clone()
         self._last_swing_onset = swing_onset.clone()
@@ -865,10 +865,10 @@ class FootholdReward(ManagerTermBase):
         if hasattr(self, "_contact_vis") and self._contact_vis is not None:
             vis_mask = self._terrain_mask if self._terrain_mask is not None else None
             if vis_mask is not None:
-                foot_pos = self._last_body_pos[vis_mask]
+                foot_pos = self._last_foot_center[vis_mask]
                 last_contact = self._last_contact[vis_mask]
             else:
-                foot_pos = self._last_body_pos
+                foot_pos = self._last_foot_center
                 last_contact = self._last_contact
             if foot_pos.shape[0] > 0:
                 foot_pos_ground = foot_pos.clone()
@@ -885,17 +885,17 @@ class FootholdReward(ManagerTermBase):
             vis_mask = self._terrain_mask if self._terrain_mask is not None else None
             if vis_mask is not None:
                 p_star = self._p_star_cache[vis_mask]  # (M, 2, 3)
-                body_pos = self._last_body_pos[vis_mask]  # (M, 2, 3)
+                foot_pos = self._last_foot_center[vis_mask]  # (M, 2, 3)
             else:
                 p_star = self._p_star_cache
-                body_pos = self._last_body_pos
-            if body_pos.shape[0] > 0:
-                dirs = p_star - body_pos  # (M, 2, 3)
+                foot_pos = self._last_foot_center
+            if foot_pos.shape[0] > 0:
+                dirs = p_star - foot_pos  # (M, 2, 3)
                 lengths = torch.norm(dirs, dim=-1)  # (M, 2)
                 valid_mask = lengths > 0.01
                 valid_flat = valid_mask.reshape(-1)  # (M*2,)
                 if valid_flat.any():
-                    foot_flat = body_pos.reshape(-1, 3)[valid_flat]
+                    foot_flat = foot_pos.reshape(-1, 3)[valid_flat]
                     target_flat = p_star.reshape(-1, 3)[valid_flat]
                     dir_flat = dirs.reshape(-1, 3)[valid_flat]
                     len_flat = lengths.reshape(-1)[valid_flat]
@@ -917,11 +917,11 @@ class FootholdReward(ManagerTermBase):
             vis_mask = self._terrain_mask if self._terrain_mask is not None else None
             if vis_mask is not None:
                 event_timer = self._event_timer[vis_mask]
-                body_pos = self._last_body_pos[vis_mask]
+                foot_pos = self._last_foot_center[vis_mask]
             else:
                 event_timer = self._event_timer
-                body_pos = self._last_body_pos
-            if body_pos.shape[0] > 0:
+                foot_pos = self._last_foot_center
+            if foot_pos.shape[0] > 0:
                 event_positions = []
                 event_indices = []
                 for foot_idx in range(2):
@@ -929,7 +929,7 @@ class FootholdReward(ManagerTermBase):
                     swing_timer = event_timer[:, foot_idx * 2]
                     swing_active = swing_timer > 0
                     if swing_active.any():
-                        event_positions.append(body_pos[swing_active, foot_idx])
+                        event_positions.append(foot_pos[swing_active, foot_idx])
                         event_indices.append(
                             torch.zeros(
                                 swing_active.sum(),
@@ -941,7 +941,7 @@ class FootholdReward(ManagerTermBase):
                     td_timer = event_timer[:, foot_idx * 2 + 1]
                     td_active = td_timer > 0
                     if td_active.any():
-                        event_positions.append(body_pos[td_active, foot_idx])
+                        event_positions.append(foot_pos[td_active, foot_idx])
                         event_indices.append(torch.ones(td_active.sum(), dtype=torch.int, device=td_timer.device))
                 if event_positions:
                     all_pos = torch.cat(event_positions, dim=0)
