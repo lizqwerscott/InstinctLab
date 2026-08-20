@@ -1006,9 +1006,17 @@ class CurriculumCfg:
         params={
             "reward_term_name": "foothold",
             "start_weight": 0.0,
-            "end_weight": 20.0,
-            "vel_tracking_threshold": 0.5,
-            "vel_tracking_target": 0.6,
+            "end_weight": 40.0,
+            "vel_tracking_threshold": 0.75,
+            "vel_tracking_target": 0.85,
+            # 闩锁阈值:EMA 追踪分 >= 该值后权重与速度解耦(一次性闩锁),
+            # 由 ramp_rate 自行单调爬升到 end_weight,不再随追踪值回落。
+            # 默认 None = vel_tracking_target。想让追踪到 X 之后"自己慢慢变大",
+            # 把这里设成 X,并让 vel_tracking_target 高于 X——否则门控在 X 处
+            # 已饱和(权重 == end_weight),闩锁后没有爬升空间只会保持定值。
+            "latch_threshold": 0.75,
+            # 闩锁后每次课程调用(~每个 env step)叠加的权重增量,越小爬得越慢
+            "ramp_rate": 0.02,
         },
     )
 
