@@ -1010,17 +1010,18 @@ class CurriculumCfg:
             "vel_tracking_threshold": 0.75,
             "vel_tracking_target": 0.85,
             # 闩锁阈值:EMA 追踪分 >= 该值后权重与速度解耦(一次性闩锁),
-            # 由 ramp_rate 自行单调爬升到 end_weight,不再随追踪值回落。
+            # 由爬升速度(ramp_rate/ramp_steps)自行单调爬升到 end_weight,不再随追踪值回落。
             # 默认 None = vel_tracking_target。想让追踪到 X 之后"自己慢慢变大",
             # 把这里设成 X,并让 vel_tracking_target 高于 X——否则门控在 X 处
             # 已饱和(权重 == end_weight),闩锁后没有爬升空间只会保持定值。
             "latch_threshold": 0.75,
             # 爬升速度二选一:
-            #   ramp_rate  = 每个 env step 叠加的权重增量(例: 0.02 -> 0→40 需 2000 步)
+            #   ramp_rate  = 每个 env step 叠加的权重增量
             #   ramp_steps = 闩锁后多少 env step 爬满(end_weight)(更直观, 优先级更高)
-            # 本环境: 1 env step = 0.02s(50步/秒), 1 episode = 1000 步。
-            # 想 10 万步(100 episode)爬满 -> "ramp_steps": 100000, 或 "ramp_rate": 40/100000=0.0004。
-            "ramp_rate": 0.02,
+            # 本环境: 1 env step = 0.02s(50步/秒), 1 episode = 1000 步,
+            # 1 轮(PPO iteration) = 24 env step (num_steps_per_env)。
+            # 想 2000 轮爬满 -> 2000*24 = 48000 步 -> "ramp_steps": 48000。
+            "ramp_steps": 48000,
         },
     )
 
