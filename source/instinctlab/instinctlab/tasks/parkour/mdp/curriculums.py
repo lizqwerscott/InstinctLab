@@ -150,15 +150,11 @@ class foothold_weight_schedule(ManagerTermBase):
 
         if not self._latched:
             # --- gate phase: weight follows (and may oscillate with) tracking ---
-            if (
-                self._vel_tracking_ema < vel_tracking_threshold
-                or vel_tracking_target <= vel_tracking_threshold
-            ):
+            if self._vel_tracking_ema < vel_tracking_threshold or vel_tracking_target <= vel_tracking_threshold:
                 vel_factor = 0.0 if self._vel_tracking_ema < vel_tracking_threshold else 1.0
             else:
                 vel_factor = min(
-                    (self._vel_tracking_ema - vel_tracking_threshold)
-                    / (vel_tracking_target - vel_tracking_threshold),
+                    (self._vel_tracking_ema - vel_tracking_threshold) / (vel_tracking_target - vel_tracking_threshold),
                     1.0,
                 )
             new_weight = start_weight + (end_weight - start_weight) * vel_factor
