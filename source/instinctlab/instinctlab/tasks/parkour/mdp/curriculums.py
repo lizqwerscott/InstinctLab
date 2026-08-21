@@ -68,10 +68,12 @@ class foothold_weight_schedule(ManagerTermBase):
     2. **Latched phase** (once ``EMA >= latch_threshold``): the weight
        decouples from velocity entirely. The latch is one-way — a
        momentary tracking dip can no longer pull the weight back down —
-       and the weight then grows monotonically by ``ramp_rate`` per
-       curriculum call until it reaches ``end_weight``. This removes the
-       oscillation a pure velocity-gate suffers from once the robot can
-       track well.
+       and the weight then grows monotonically by ``ramp_rate`` **per env
+       step** until it reaches ``end_weight``. The ramp is driven by
+       ``env.common_step_counter`` (not the call frequency), so its
+       timing is exact regardless of how often this term is invoked.
+       This removes the oscillation a pure velocity-gate suffers from
+       once the robot can track well.
 
     ``latch_threshold`` defaults to ``vel_tracking_target``. To get a
     visible self-paced climb after latching, keep ``latch_threshold``
@@ -91,7 +93,8 @@ class foothold_weight_schedule(ManagerTermBase):
         self._initial_weight = None
         self._vel_tracking_ema = 0.0
         self._latched = False
-        self._ramp_weight = None
+        self._latch_step = 0
+        self._latch_base_weight = None
 
     def __call__(
         self,
@@ -159,6 +162,7 @@ class foothold_weight_schedule(ManagerTermBase):
                     1.0,
                 )
             new_weight = start_weight + (end_weight - start_weight) * vel_factor
+            ramp_weight = 0.0
 
             # one-way latch: once tracking has proven good enough, decouple.
             if self._vel_tracking_ema >= latch_threshold:
@@ -172,16 +176,21 @@ class foothold_weight_schedule(ManagerTermBase):
                     latch_cap = min(max(latch_cap, 0.0), 1.0)
                 else:
                     latch_cap = 1.0 if latch_threshold >= vel_tracking_threshold else 0.0
-                self._ramp_weight = start_weight + (end_weight - start_weight) * min(vel_factor, latch_cap)
+                self._latch_base_weight = start_weight + (end_weight - start_weight) * min(vel_factor, latch_cap)
+                self._latch_step = env.common_step_counter
                 # emit the ramp start right away so the latch step doesn't jump
                 # to the (uncapped) gate value and drop on the next call
-                new_weight = self._ramp_weight
+                new_weight = self._latch_base_weight
+                ramp_weight = new_weight
         else:
-            # --- latched phase: self-paced monotonic climb, decoupled from velocity ---
-            self._ramp_weight = min(self._ramp_weight + ramp_rate, end_weight)
-            new_weight = self._ramp_weight
+            # --- latched phase: self-paced monotonic climb per env step, decoupled
+            # from velocity. Driven by env.common_step_counter so the ramp timing
+            # is exact no matter how often this term is invoked.
+            steps_since_latch = env.common_step_counter - self._latch_step
+            ramp_weight = min(self._latch_base_weight + ramp_rate * steps_since_latch, end_weight)
+            new_weight = ramp_weight
             if end_weight > start_weight:
-                vel_factor = min((self._ramp_weight - start_weight) / (end_weight - start_weight), 1.0)
+                vel_factor = min((ramp_weight - start_weight) / (end_weight - start_weight), 1.0)
             else:
                 vel_factor = 1.0
 
@@ -192,5 +201,5 @@ class foothold_weight_schedule(ManagerTermBase):
             "vel_tracking_ema": self._vel_tracking_ema,
             "instant_tracking": instant_tracking,
             "latched": float(self._latched),
-            "ramp_weight": self._ramp_weight if self._latched else 0.0,
+            "ramp_weight": ramp_weight,
         }
