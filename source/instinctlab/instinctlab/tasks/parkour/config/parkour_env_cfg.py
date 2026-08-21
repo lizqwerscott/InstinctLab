@@ -1015,10 +1015,11 @@ class CurriculumCfg:
             # 把这里设成 X,并让 vel_tracking_target 高于 X——否则门控在 X 处
             # 已饱和(权重 == end_weight),闩锁后没有爬升空间只会保持定值。
             "latch_threshold": 0.75,
-            # 闩锁后每个 env step 叠加的权重增量(由 env.common_step_counter 精确计数,
-            # 与课程调用频率无关)。爬升时长 = (end_weight - 闩锁时权重) / ramp_rate 个 env step。
-            # 本环境 env step dt = 0.005*4 = 0.02s(50 步/秒),episode = 20s = 1000 步。
-            # 例: 0.02 -> 0→40 需 2000 步(≈2 个 episode); 想要 n 步爬满 -> ramp_rate = 40 / n。
+            # 爬升速度二选一:
+            #   ramp_rate  = 每个 env step 叠加的权重增量(例: 0.02 -> 0→40 需 2000 步)
+            #   ramp_steps = 闩锁后多少 env step 爬满(end_weight)(更直观, 优先级更高)
+            # 本环境: 1 env step = 0.02s(50步/秒), 1 episode = 1000 步。
+            # 想 10 万步(100 episode)爬满 -> "ramp_steps": 100000, 或 "ramp_rate": 40/100000=0.0004。
             "ramp_rate": 0.02,
         },
     )
