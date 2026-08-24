@@ -46,6 +46,22 @@ def feet_air_time(env, command_name: str, vel_threshold: float, sensor_cfg: Scen
     return reward
 
 
+def gait_freq_anchor_reward(env: ManagerBasedRLEnv, action_name: str = "gait_frequency") -> torch.Tensor:
+    """Anchor the EMA gait frequency close to its nominal value (Egle 2024 Table I:
+    R_freq = exp(-|f_hat|); the 2x weight is applied at the reward-term level)."""
+    action_term = env.action_manager.get_term(action_name)
+    frequency = action_term.filtered_frequency[:, 0]
+    return torch.exp(-torch.abs(frequency - action_term.cfg.frequency_nom))
+
+
+def ss_ratio_anchor_reward(env: ManagerBasedRLEnv, action_name: str = "gait_frequency") -> torch.Tensor:
+    """Anchor the single-support ratio close to its nominal value (Egle 2024 Table I:
+    R_ss = exp(-5|r_hat|); the 1x weight is applied at the reward-term level)."""
+    action_term = env.action_manager.get_term(action_name)
+    ratio = action_term.filtered_ratio[:, 0]
+    return torch.exp(-5.0 * torch.abs(ratio - action_term.cfg.ratio_nom))
+
+
 def stand_still(
     env: ManagerBasedRLEnv,
     command_name: str,
@@ -528,6 +544,23 @@ class FootholdReward(ManagerTermBase):
         swing_onset = (air_time > self._edge_hold_time) & (air_time < self._edge_window)  # (N, 2)
         touchdown = (contact_time > self._edge_hold_time) & (contact_time < self._edge_window)  # (N, 2)
 
+        # ---- 2b. Gait clock coupling (Egle-style dual knob f, r) -------------
+        # Reads the GaitFrequencyAction clock: stride frequency f, single-support
+        # ratio r and the per-leg swing windows. Falls back to pure event-triggered
+        # behavior (no double support) when the action term is absent.
+        try:
+            gait_term = env.action_manager.get_term("gait_frequency")
+        except ValueError:
+            gait_term = None
+        if gait_term is not None:
+            gait_freq = gait_term.filtered_frequency[:, 0]   # (N,) stride freq (Hz)
+            gait_ratio = gait_term.filtered_ratio[:, 0]      # (N,) single-support ratio
+            in_window = gait_term.swing_window()             # (N, 2) per-leg swing windows
+            T_swing_eff = (gait_ratio / (2.0 * gait_freq)).clamp(min=0.1)  # (N,)
+        else:
+            in_window = torch.ones_like(swing_onset)
+            T_swing_eff = torch.full((env.num_envs,), self._T_swing, device=env.device)
+
         # ---- 2c. Phase-state update --------------------------------------
         # When a foot loses contact it becomes the new swing leg.
         #   swing_onset[:, 0] == True  → left foot just lifted  → phase_left=True
@@ -575,7 +608,10 @@ class FootholdReward(ManagerTermBase):
         # Left foot swing onset  → plan left-foot target (stance = right foot, sign = +1)
         # Right foot swing onset → plan right-foot target (stance = left foot, sign = -1)
         for foot_idx in range(2):
-            mask = swing_onset[:, foot_idx]
+            # Double support: a swing may only be planned while this foot's phase
+            # window is open (Egle 2024: the double-support phase admits no new
+            # step). The gap between the two legs' windows IS the double support.
+            mask = swing_onset[:, foot_idx] & in_window[:, foot_idx]
             if mask.any():
                 if foot_idx == 0:  # left foot
                     p_new = self._planner.plan_in_world(
@@ -697,7 +733,9 @@ class FootholdReward(ManagerTermBase):
             )
             if tracking_mask.any():
                 # Quintic-smoothstep time warping (zero endpoint vel/acc).
-                u_time_clamped = (self._swing_elapsed[tracking_mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)
+                u_time_clamped = (
+                    self._swing_elapsed[tracking_mask, foot_idx] / T_swing_eff[tracking_mask]
+                ).clamp(0.0, 1.0)
                 u = u_time_clamped**3 * (10.0 - 15.0 * u_time_clamped + 6.0 * u_time_clamped**2)
                 u_unsq = u.unsqueeze(-1)
 

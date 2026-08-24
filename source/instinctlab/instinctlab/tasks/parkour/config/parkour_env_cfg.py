@@ -446,6 +446,20 @@ class ObservationsCfg:
             params={"action_name": "gait_frequency"},
             noise=None,
         )
+        gait_ratio = ObsTerm(
+            func=mdp.gait_ratio,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
+            noise=None,
+        )
+        gait_ss_ds_sign = ObsTerm(
+            func=mdp.gait_ss_ds_sign,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
+            noise=None,
+        )
         joint_pos_rel = ObsTerm(
             func=mdp.joint_pos_rel,
             noise=Unoise(n_min=-0.01, n_max=0.01),
@@ -500,6 +514,20 @@ class ObservationsCfg:
         )
         gait_phase = ObsTerm(
             func=mdp.gait_phase,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
+            noise=None,
+        )
+        gait_ratio = ObsTerm(
+            func=mdp.gait_ratio,
+            history_length=8,
+            flatten_history_dim=True,
+            params={"action_name": "gait_frequency"},
+            noise=None,
+        )
+        gait_ss_ds_sign = ObsTerm(
+            func=mdp.gait_ss_ds_sign,
             history_length=8,
             flatten_history_dim=True,
             params={"action_name": "gait_frequency"},
@@ -639,10 +667,17 @@ class ActionsCfg:
     )
     gait_frequency = mdp.GaitFrequencyActionCfg(
         asset_name="robot",
-        frequency_range=(1.5, 2.5),
+        # 口径: φ 一周 = 步幅(两步)。T_swing=0.45 时交替步态 f≈1.11 Hz,
+        # 加 T_ds=0.15 后 f≈0.83 Hz, (0.7, 1.3) 覆盖两者。
+        frequency_range=(0.7, 1.3),
+        frequency_nom=1.0,
         ema_alpha=0.2,
         initial_frequency=1.0,
         initial_phase=0.0,
+        ratio_range=(0.55, 0.95),
+        ratio_nom=0.75,
+        ratio_ema_alpha=0.2,
+        initial_ratio=0.75,
     )
 
 
@@ -770,6 +805,12 @@ class G1Rewards:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
+    gait_freq_anchor = RewTerm(
+        func=mdp.gait_freq_anchor_reward, weight=2.0, params={"action_name": "gait_frequency"}
+    )
+    ss_ratio_anchor = RewTerm(
+        func=mdp.ss_ratio_anchor_reward, weight=1.0, params={"action_name": "gait_frequency"}
+    )
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
     pelvis_orientation_l2 = RewTerm(
         func=mdp.link_orientation,

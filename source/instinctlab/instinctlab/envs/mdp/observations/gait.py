@@ -23,3 +23,21 @@ def gait_phase(
     """Return sine/cosine features for the gait phase produced by the action term."""
     action_term = env.action_manager.get_term(action_name)
     return action_term.phase_features
+
+
+def gait_ratio(
+    env: ManagerBasedEnv,
+    action_name: str = "gait_frequency",
+) -> torch.Tensor:
+    """Return the EMA-filtered single-support ratio produced by the action term."""
+    action_term = env.action_manager.get_term(action_name)
+    return action_term.filtered_ratio
+
+
+def gait_ss_ds_sign(
+    env: ManagerBasedEnv,
+    action_name: str = "gait_frequency",
+) -> torch.Tensor:
+    """Return +1 in single support / -1 in double support (Egle-style phase sign)."""
+    action_term = env.action_manager.get_term(action_name)
+    return action_term.ss_ds_sign
