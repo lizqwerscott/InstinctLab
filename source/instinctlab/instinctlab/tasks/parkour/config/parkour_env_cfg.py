@@ -806,10 +806,22 @@ class G1Rewards:
     )
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
     gait_freq_anchor = RewTerm(
-        func=mdp.gait_freq_anchor_reward, weight=2.0, params={"action_name": "gait_frequency"}
+        func=mdp.gait_freq_anchor_reward,
+        weight=2.0,
+        params={
+            "action_name": "gait_frequency",
+            # 锚定奖励只在楼梯地形生效: 步态旋钮的训练信号不泄漏到平坦地形
+            "terrain_names": ["pyramid_stairs", "pyramid_stairs_inv", "up_down", "down_up"],
+        },
     )
     ss_ratio_anchor = RewTerm(
-        func=mdp.ss_ratio_anchor_reward, weight=1.0, params={"action_name": "gait_frequency"}
+        func=mdp.ss_ratio_anchor_reward,
+        weight=1.0,
+        params={
+            "action_name": "gait_frequency",
+            # 锚定奖励只在楼梯地形生效: 步态旋钮的训练信号不泄漏到平坦地形
+            "terrain_names": ["pyramid_stairs", "pyramid_stairs_inv", "up_down", "down_up"],
+        },
     )
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
     pelvis_orientation_l2 = RewTerm(

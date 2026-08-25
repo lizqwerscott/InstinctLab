@@ -46,20 +46,80 @@ def feet_air_time(env, command_name: str, vel_threshold: float, sensor_cfg: Scen
     return reward
 
 
-def gait_freq_anchor_reward(env: ManagerBasedRLEnv, action_name: str = "gait_frequency") -> torch.Tensor:
+def _build_terrain_mask(
+    env: "ManagerBasedRLEnv", terrain_names: list[str] | None
+) -> torch.Tensor | None:
+    """Build an (N,) bool mask for envs on any of ``terrain_names``.
+
+    Column-to-sub-terrain mapping derives from the relative proportions in the
+    terrain-generator config (same convention as the velocity-ranges mapping in
+    ``PoseVelocityCommand``). Returns ``None`` when ``terrain_names`` is empty.
+    """
+    if not terrain_names:
+        return None
+    terrain = env.scene["terrain"]
+    cfg = terrain.cfg.terrain_generator
+    sub_names = list(cfg.sub_terrains.keys())
+    proportions = np.array(
+        [cfg.sub_terrains[n].proportion for n in sub_names],
+        dtype=np.float64,
+    )
+    proportions /= np.sum(proportions)
+
+    sub_indices = np.empty(cfg.num_cols, dtype=np.int32)
+    cumsum = np.cumsum(proportions)
+    for col in range(cfg.num_cols):
+        sub_indices[col] = int(np.min(np.where(col / cfg.num_cols + 0.001 < cumsum)[0]))
+
+    mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    for name in terrain_names:
+        if name not in sub_names:
+            continue
+        type_idx = sub_names.index(name)
+        for col_idx in np.where(sub_indices == type_idx)[0]:
+            env_ids = torch.where(terrain.terrain_types == col_idx)[0]
+            mask[env_ids] = True
+    return mask
+
+
+def gait_freq_anchor_reward(
+    env: ManagerBasedRLEnv,
+    action_name: str = "gait_frequency",
+    terrain_names: list[str] | None = None,
+) -> torch.Tensor:
     """Anchor the EMA gait frequency close to its nominal value (Egle 2024 Table I:
-    R_freq = exp(-|f_hat|); the 2x weight is applied at the reward-term level)."""
+    R_freq = exp(-|f_hat|); the 2x weight is applied at the reward-term level).
+
+    ``terrain_names`` restricts the anchor to the listed sub-terrains (stairs);
+    elsewhere the anchor is zero so the gait knobs only train on those terrains.
+    """
     action_term = env.action_manager.get_term(action_name)
     frequency = action_term.filtered_frequency[:, 0]
-    return torch.exp(-torch.abs(frequency - action_term.cfg.frequency_nom))
+    reward = torch.exp(-torch.abs(frequency - action_term.cfg.frequency_nom))
+    mask = _build_terrain_mask(env, terrain_names)
+    if mask is not None:
+        reward = reward * mask
+    return reward
 
 
-def ss_ratio_anchor_reward(env: ManagerBasedRLEnv, action_name: str = "gait_frequency") -> torch.Tensor:
+def ss_ratio_anchor_reward(
+    env: ManagerBasedRLEnv,
+    action_name: str = "gait_frequency",
+    terrain_names: list[str] | None = None,
+) -> torch.Tensor:
     """Anchor the single-support ratio close to its nominal value (Egle 2024 Table I:
-    R_ss = exp(-5|r_hat|); the 1x weight is applied at the reward-term level)."""
+    R_ss = exp(-5|r_hat|); the 1x weight is applied at the reward-term level).
+
+    ``terrain_names`` restricts the anchor to the listed sub-terrains (stairs);
+    elsewhere the anchor is zero so the gait knobs only train on those terrains.
+    """
     action_term = env.action_manager.get_term(action_name)
     ratio = action_term.filtered_ratio[:, 0]
-    return torch.exp(-5.0 * torch.abs(ratio - action_term.cfg.ratio_nom))
+    reward = torch.exp(-5.0 * torch.abs(ratio - action_term.cfg.ratio_nom))
+    mask = _build_terrain_mask(env, terrain_names)
+    if mask is not None:
+        reward = reward * mask
+    return reward
 
 
 def stand_still(
@@ -1189,29 +1249,7 @@ class FootholdReward(ManagerTermBase):
         defined in the terrain-generator config.  The mask is recomputed
         on the first call and after every reset.
         """
-        terrain = env.scene["terrain"]
-        cfg = terrain.cfg.terrain_generator
-        sub_names = list(cfg.sub_terrains.keys())
-        proportions = np.array(
-            [cfg.sub_terrains[n].proportion for n in sub_names],
-            dtype=np.float64,
-        )
-        proportions /= np.sum(proportions)
-
-        sub_indices = np.empty(cfg.num_cols, dtype=np.int32)
-        cumsum = np.cumsum(proportions)
-        for col in range(cfg.num_cols):
-            sub_indices[col] = int(np.min(np.where(col / cfg.num_cols + 0.001 < cumsum)[0]))
-
-        mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        for name in self._terrain_names:
-            if name not in sub_names:
-                continue
-            type_idx = sub_names.index(name)
-            for col_idx in np.where(sub_indices == type_idx)[0]:
-                env_ids = torch.where(terrain.terrain_types == col_idx)[0]
-                mask[env_ids] = True
-        self._terrain_mask = mask
+        self._terrain_mask = _build_terrain_mask(env, self._terrain_names)
 
     # ------------------------------------------------------------------
 
