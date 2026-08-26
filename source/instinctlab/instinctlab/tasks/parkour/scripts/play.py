@@ -193,6 +193,8 @@ def main():
                         "velocity_commands",
                         "gait_frequency",
                         "gait_phase",
+                        "gait_ratio",
+                        "gait_ss_ds_sign",
                         "joint_pos_rel",
                         "joint_vel_rel",
                         "last_action",
