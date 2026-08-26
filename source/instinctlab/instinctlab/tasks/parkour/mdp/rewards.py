@@ -216,8 +216,10 @@ class FootholdReward(ManagerTermBase):
       - proximity_weight == 0, bezier_weight > 0  → dense Bézier tracking only
       - both > 0                                  → both components summed
     The two components share one DCM planner, one phase-state machine and one
-    foothold-target cache (single per-frame pipeline). No touchdown/over-time
-    penalties are applied.
+    foothold-target cache (single per-frame pipeline). The dense swing term is
+    gated by actual commanded-direction body progress so it cannot be farmed
+    by stepping in place. A short landing-hold reward keeps the foot near the
+    target after contact.
     """
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv"):
@@ -255,6 +257,11 @@ class FootholdReward(ManagerTermBase):
         self._apex_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
         # u_peak (Eq 10) — pre-computed per foot at swing onset
         self._u_peak_cache = torch.zeros(env.num_envs, 2, device=env.device)
+        self._landing_hold_time = cfg.params.get("landing_hold_time", 0.12)
+        self._landing_hold_weight = cfg.params.get("landing_hold_weight", 1.0)
+        self._progress_gate_min_velocity = cfg.params.get("progress_gate_min_velocity", 0.10)
+        self._landing_hold_remaining = torch.zeros(env.num_envs, 2, device=self.device)
+        self._landing_hold_started = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=self.device)
 
         # ---- Internal state weights (方案B: 一个奖励内部区分状态) ----
         self._proximity_weight = cfg.params.get("proximity_weight", 1.0)
@@ -488,6 +495,9 @@ class FootholdReward(ManagerTermBase):
         foot_center_offset: tuple[float, float, float] | None = None,
         edge_hold_time: float | None = None,
         edge_window: float | None = None,
+        landing_hold_time: float | None = None,
+        landing_hold_weight: float | None = None,
+        progress_gate_min_velocity: float | None = None,
         terrain_names: list[str] | None = None,
     ) -> torch.Tensor:
         """Compute the combined foothold reward.
@@ -604,6 +614,8 @@ class FootholdReward(ManagerTermBase):
                     )
                     self._p_star_cache[mask, 1] = p_new
                 self._swing_planned[mask, foot_idx] = True
+                self._landing_hold_started[mask, foot_idx] = False
+                self._landing_hold_remaining[mask, foot_idx] = 0.0
 
                 # ---- Bézier setup at swing onset (shared state) ----
                 # Record lift-off position (P0)
@@ -679,11 +691,30 @@ class FootholdReward(ManagerTermBase):
         # ---- 4b. Swing elapsed timer (always updated; drives bezier tracking window) --
         self._swing_elapsed += env.step_dt * is_swinging.float()  # (N, 2)
 
-        reward = torch.zeros(env.num_envs, device=env.device)
+        vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
+        cmd_xy = vel_cmd_full[:, :2]
+        cmd_speed = torch.norm(cmd_xy, dim=1)
+        cmd_dir = cmd_xy / cmd_speed.unsqueeze(-1).clamp(min=1e-6)
+        commanded_direction_speed = (asset.data.root_lin_vel_b[:, :2] * cmd_dir).sum(dim=1)
+        progress_denominator = (cmd_speed - self._progress_gate_min_velocity).clamp(min=1e-6)
+        progress_gate = ((commanded_direction_speed - self._progress_gate_min_velocity) / progress_denominator).clamp(
+            0.0, 1.0
+        )
+        progress_gate = torch.where(
+            cmd_speed > self._progress_gate_min_velocity,
+            progress_gate,
+            torch.zeros_like(progress_gate),
+        )
+
         # touchdown 门控 (与 td_mask 同源): 仅当该脚确有摆动计划时才视为真实触地事件。
         # 排除 reset 后传感器时间量重新累积产生的假触地 (reset 时 swing_planned 已清零)。
-        # 注意: 必须在循环前计算, 循环内 4c-iii 会清除 swing_planned。
         touchdown_active = touchdown & self._swing_planned  # (N, 2)
+        landing_start = touchdown_active & ~self._landing_hold_started
+        if landing_start.any():
+            self._landing_hold_started[landing_start] = True
+            self._landing_hold_remaining[landing_start] = self._landing_hold_time
+
+        reward = torch.zeros(env.num_envs, device=env.device)
         for foot_idx in range(2):
             # Shared swing-phase masks (both components vote on the same swing)
             td_mask = touchdown_active[:, foot_idx]  # (N,)
@@ -744,7 +775,7 @@ class FootholdReward(ManagerTermBase):
                 # regardless of tracking quality → must actually advance the
                 # swing to earn meaningful reward.
                 tracking_quality = torch.exp(-sigma_p * pos_err_sq - self._sigma_d * ori_err_sq)
-                reward[tracking_mask] += self._bezier_weight * u * tracking_quality
+                reward[tracking_mask] += self._bezier_weight * u * tracking_quality * progress_gate[tracking_mask]
 
             # ---- 4c-ii. Sparse reward: one-shot proximity at touchdown ----------
             if self._proximity_weight > 0.0 and td_mask.any():
@@ -753,12 +784,26 @@ class FootholdReward(ManagerTermBase):
                 foot_reward = torch.exp(-sigma_p * dist_sq)  # (M,)
                 reward[td_mask] += self._proximity_weight * foot_reward
 
+            hold_mask = (
+                in_contact[:, foot_idx]
+                & self._landing_hold_started[:, foot_idx]
+                & (self._landing_hold_remaining[:, foot_idx] > 0.0)
+            )
+            if self._landing_hold_weight > 0.0 and hold_mask.any():
+                dist = foot_center[hold_mask, foot_idx] - self._p_star_cache[hold_mask, foot_idx]
+                dist_sq = (dist**2).sum(dim=-1)
+                reward[hold_mask] += self._landing_hold_weight * torch.exp(-sigma_p * dist_sq)
+
+            self._landing_hold_remaining[hold_mask, foot_idx] = torch.clamp(
+                self._landing_hold_remaining[hold_mask, foot_idx] - env.step_dt,
+                min=0.0,
+            )
+
             # ---- 4c-iii. Clear swing flags on touchdown (phase machine cleanup) ---
             if td_mask.any():
                 self._swing_planned[td_mask, foot_idx] = False
 
         # ---- 4c. Velocity-condition gate -----------------------------------
-        vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
         has_lin_vel = torch.norm(vel_cmd_full[:, :2], dim=1) > 0.05  # (N,)
         reward = torch.where(has_lin_vel, reward, reward * 0.0)
 
@@ -1132,6 +1177,8 @@ class FootholdReward(ManagerTermBase):
         self._lift_off_pos[env_ids] = 0.0
         self._apex_cache[env_ids] = 0.0
         self._u_peak_cache[env_ids] = 0.0
+        self._landing_hold_remaining[env_ids] = 0.0
+        self._landing_hold_started[env_ids] = False
         if hasattr(self, "_event_timer"):
             self._event_timer[env_ids] = 0
         self._terrain_mask = None
