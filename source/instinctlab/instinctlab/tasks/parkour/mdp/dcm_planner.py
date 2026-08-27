@@ -219,7 +219,8 @@ class DCMFootholdPlanner:
         corrections (Δψ = ω_z·T): the translation part (v·T) rotates by the
         mid-swing heading Δψ/2 (chord direction of the arc path) and the
         lateral leg offset (0, sgn·lp) rotates by the full yaw Δψ, so
-        L_nom/W_nom (and hence d_pos and the b_nom maps) describe the turning gait.
+        L_nom/W_nom (and hence d_pos) describe the turning gait. The b_nom maps
+        keep the straight-gait (non-deflected) L_nom/W_nom values.
 
         Returns dict with keys:
             Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
@@ -298,6 +299,11 @@ class DCMFootholdPlanner:
         L_nom = vx_map * self.T  # (N,1,1)  = vx·T
         W_nom = vy_map * self.T + sgn_map * self.lp  # (N,1,1)  = vy·T + (-1)ⁱ·l
 
+        # Straight-gait (non-deflected) copies for b_nom: the DCM offset keeps
+        # the straight-gait nominal step even during turning.
+        L_nom_bnom = L_nom
+        W_nom_bnom = W_nom
+
         # ---- Turning: chord-aimed desired foothold (Δψ = ω_z·T) ----
         # Superposition of two rotations, exact for steady circular walking:
         # 1) Translation part (v·T) is a process quantity accumulated over
@@ -306,6 +312,8 @@ class DCMFootholdPlanner:
         # 2) Lateral offset (0, sgn·lp) is a touchdown-instant constraint ->
         #    rotate by the full yaw Δψ.
         # ω_z=0 is a bit-exact no-op (straight gait unchanged).
+        # Only L_nom/W_nom (used by d_pos and returned) carry the deflection;
+        # L_nom_bnom/W_nom_bnom stay straight-gait values for the b_nom maps.
         if omega_z is not None:
             dpsi = omega_z.view(N, 1, 1) * self.T
             dpsi_half = 0.5 * dpsi
@@ -353,14 +361,14 @@ class DCMFootholdPlanner:
             exp_sigma_m1_exp = exp_sigma_m1.view(N, 1, 1)
             sgn_exp = swing_leg_sign.float().view(N, 1, 1)
 
-            # b_nom_x = vx·T / (e^{σ} − 1) = L_nom / (e^{σ}−1)
-            bx_map = L_nom / exp_sigma_m1_exp
+            # b_nom_x = vx·T / (e^{σ} − 1) = L_nom_bnom / (e^{σ}−1)
+            bx_map = L_nom_bnom / exp_sigma_m1_exp
 
-            # b_nom_y = (-1)ⁱ·lp/(1+e^{σ}) − W_nom/(1−e^{σ})
+            # b_nom_y = (-1)ⁱ·lp/(1+e^{σ}) − W_nom_bnom/(1−e^{σ})
             # Note: (1 − e^{σ}) = −(e^{σ} − 1), so:
-            #   = (-1)ⁱ·lp/(1+e^{σ}) + W_nom/(e^{σ}−1)
+            #   = (-1)ⁱ·lp/(1+e^{σ}) + W_nom_bnom/(e^{σ}−1)
             one_plus_exp = 1.0 + exp_sigma_exp
-            by_map = (sgn_exp * self.lp) / one_plus_exp + W_nom / exp_sigma_m1_exp
+            by_map = (sgn_exp * self.lp) / one_plus_exp + W_nom_bnom / exp_sigma_m1_exp
 
             # ξ_T = u₀ + (ξ₀ − u₀)·e^{σ(T)},  u₀ = stance foot (CoP) in pelvis-local
             if com_local is not None and com_vel_local is not None:
@@ -378,11 +386,11 @@ class DCMFootholdPlanner:
             # ---- k is None → all environments are flat ----
             sgn_exp = swing_leg_sign.float().view(N, 1, 1)
 
-            # b_nom_x = L_nom / (e^{ω₀·T}−1)   (= vx · bx_coef_flat)
-            bx_map = L_nom / (self.exp_wT_flat - 1.0)
+            # b_nom_x = L_nom_bnom / (e^{ω₀·T}−1)   (= vx · bx_coef_flat)
+            bx_map = L_nom_bnom / (self.exp_wT_flat - 1.0)
 
             one_plus_exp_flat = 1.0 + self.exp_wT_flat
-            by_map = (sgn_exp * self.lp) / one_plus_exp_flat + W_nom / (self.exp_wT_flat - 1.0)
+            by_map = (sgn_exp * self.lp) / one_plus_exp_flat + W_nom_bnom / (self.exp_wT_flat - 1.0)
 
             # ξ_T = u₀ + (ξ₀ − u₀)·e^{ω₀·T},  u₀ = stance foot (CoP) in pelvis-local
             if com_local is not None and com_vel_local is not None:
