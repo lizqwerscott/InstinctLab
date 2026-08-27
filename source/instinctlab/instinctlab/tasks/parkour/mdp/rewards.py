@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import weakref
 from typing import TYPE_CHECKING
 
@@ -207,19 +208,12 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
 
 
 class FootholdReward(ManagerTermBase):
-    """Combined foothold reward: sparse touchdown (proximity) + dense per-frame
-    Bézier swing tracking in a single reward term.
+    """Phase-driven foothold reward with DCM targets confirmed by real contact.
 
-    The external RewTerm weight scales the total reward. Inside the term,
-    ``proximity_weight`` and ``bezier_weight`` select the state:
-      - proximity_weight > 0, bezier_weight == 0  → sparse touchdown reward only
-      - proximity_weight == 0, bezier_weight > 0  → dense Bézier tracking only
-      - both > 0                                  → both components summed
-    The two components share one DCM planner, one phase-state machine and one
-    foothold-target cache (single per-frame pipeline). The dense swing term is
-    gated by actual commanded-direction body progress so it cannot be farmed
-    by stepping in place. A short landing-hold reward keeps the foot near the
-    target after contact.
+    A fixed alternating gait phase defines the expected swing trajectory and
+    contact schedule. DCM footholds are planned only when the contralateral
+    expected stance foot is physically in contact. A real touchdown then
+    settles the one-shot foothold accuracy reward and ends that swing task.
     """
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv"):
@@ -247,22 +241,38 @@ class FootholdReward(ManagerTermBase):
         self._delta_r_minus = cfg.params.get("delta_r_minus", 0.05)
         self._delta_r_plus = cfg.params.get("delta_r_plus", 0.25)
         self._sigma_d = cfg.params.get("sigma_d", 0.0)
+        self._sigma_bezier = cfg.params.get("sigma_bezier", 50.0)
+
+        # ---- Alternating gait phase -------------------------------------
+        self._duty_factor = cfg.params.get("duty_factor", 0.5)
+        self._phase_transition_sigma = cfg.params.get("phase_transition_sigma", 0.04)
+        self._phase_speed_threshold = cfg.params.get("phase_speed_threshold", 0.05)
+        self._warmup_time_range = cfg.params.get("warmup_time_range", (0.05, 0.15))
+        self._swing_contact_weight = cfg.params.get("swing_contact_weight", 0.2)
+        if not 0.0 < self._duty_factor < 1.0:
+            raise ValueError(f"duty_factor must be in (0, 1), got {self._duty_factor}.")
+        if self._phase_transition_sigma <= 0.0:
+            raise ValueError(f"phase_transition_sigma must be positive, got {self._phase_transition_sigma}.")
+        if self._T_swing <= 0.0:
+            raise ValueError(f"T_swing must be positive, got {self._T_swing}.")
+
+        self._gait_frequency = (1.0 - self._duty_factor) / self._T_swing
+        self._phase_offset = 0.5
+        self._gait_phase = torch.zeros(env.num_envs, device=env.device)
+        self._phase_active = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._walking_last = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._next_left_swing = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._warmup_remaining = torch.empty(env.num_envs, device=env.device).uniform_(
+            self._warmup_time_range[0], self._warmup_time_range[1]
+        )
 
         # ---- Bézier swing trajectory state ----
-        # Swing elapsed timer (seconds since lift-off, per foot)
-        self._swing_elapsed = torch.zeros(env.num_envs, 2, device=env.device)
         # Lift-off foot centre position (P0) — cached at swing onset
         self._lift_off_pos = torch.zeros(env.num_envs, 2, 3, device=env.device)
         # Bézier apex position (P1) — computed at swing onset
         self._apex_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
         # u_peak (Eq 10) — pre-computed per foot at swing onset
         self._u_peak_cache = torch.zeros(env.num_envs, 2, device=env.device)
-        self._landing_hold_time = cfg.params.get("landing_hold_time", 0.12)
-        self._landing_hold_weight = cfg.params.get("landing_hold_weight", 1.0)
-        self._progress_gate_min_velocity = cfg.params.get("progress_gate_min_velocity", 0.10)
-        self._landing_hold_remaining = torch.zeros(env.num_envs, 2, device=self.device)
-        self._landing_hold_started = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=self.device)
-
         # ---- Internal state weights (方案B: 一个奖励内部区分状态) ----
         self._proximity_weight = cfg.params.get("proximity_weight", 1.0)
         self._bezier_weight = cfg.params.get("bezier_weight", 1.0)
@@ -271,18 +281,21 @@ class FootholdReward(ManagerTermBase):
         self._planner = DCMFootholdPlanner(
             num_envs=env.num_envs,
             device=env.device,
+            T=self._T_swing,
             max_fwd_range=cfg.params.get("max_fwd_range", 0.4),
             max_bwd_range=cfg.params.get("max_bwd_range", 0.0),
         )
+        masses = env.scene[self._asset_cfg.name].root_physx_view.get_masses()
+        self._robot_weight = masses.sum(dim=-1).to(device=env.device) * 9.81
+        if self._robot_weight.numel() == 1:
+            self._robot_weight = self._robot_weight.expand(env.num_envs)
         # Per-foot caching: [left, right] order (as returned by body_ids)
         # Lazily initialised with actual foot positions on first __call__ to
         # avoid rendering spheres at the world origin (0,0,0).
         self._p_star_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
         self._p_star_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        # ---- Phase-state machine for swing-leg tracking -------------------
-        # True  = left  leg is the swing leg (right leg is stance)
-        # False = right leg is the swing leg (left  leg is stance)
-        # Initialised to left-swing by default; reset() can randomise.
+        # True when the left leg is the phase-scheduled swing leg. This is
+        # retained for debug visualisation and is derived from _gait_phase.
         self._phase_left_swing = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
 
         # ---- Contact edge detection (window gating, replaces EMA) --------
@@ -468,6 +481,63 @@ class FootholdReward(ManagerTermBase):
             self._bezier_vis = VisualizationMarkers(bezier_vis_cfg)
             self._bezier_vis.set_visibility(True)
 
+    # ------------------------------------------------------------------
+    # Phase helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normal_cdf(x: torch.Tensor) -> torch.Tensor:
+        return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+
+    def _homogenized_phase(self, phase: torch.Tensor) -> torch.Tensor:
+        """Map raw phase φ to φ̄ ∈ [0, 1] (HugWBC Eq. 6)."""
+        duty = self._duty_factor
+        return torch.where(
+            phase < duty,
+            0.5 * phase / duty,
+            0.5 + 0.5 * (phase - duty) / (1.0 - duty),
+        )
+
+    def _expected_contact_prob(self, phase: torch.Tensor) -> torch.Tensor:
+        """Smooth expected contact probability C(φ) (HugWBC Eq. 5)."""
+        phi_bar = self._homogenized_phase(phase)
+        sigma = self._phase_transition_sigma
+        Phi = self._normal_cdf
+        return Phi(phi_bar / sigma) * (1.0 - Phi((phi_bar - 0.5) / sigma)) + Phi((phi_bar - 1.0) / sigma) * (
+            1.0 - Phi((phi_bar - 1.5) / sigma)
+        )
+
+    def _crossed_into_swing(self, prev_phase: torch.Tensor, curr_phase: torch.Tensor) -> torch.Tensor:
+        return (prev_phase < self._duty_factor) & (curr_phase >= self._duty_factor)
+
+    def _swing_progress(self, phase: torch.Tensor) -> torch.Tensor:
+        """Normalised swing progress s ∈ [0, 1] inside the swing half-cycle."""
+        return ((phase - self._duty_factor) / (1.0 - self._duty_factor)).clamp(0.0, 1.0)
+
+    def _sample_warmup(self, n: int, device: torch.device) -> torch.Tensor:
+        lo, hi = self._warmup_time_range
+        return torch.empty(n, device=device).uniform_(lo, hi)
+
+    def _cache_bezier_geometry(self, mask: torch.Tensor, foot_idx: int, foot_center: torch.Tensor) -> None:
+        """Cache P0 / P1 / u_peak for a planned swing foot."""
+        self._lift_off_pos[mask, foot_idx] = foot_center[mask, foot_idx]
+        p_l = self._lift_off_pos[mask, foot_idx]
+        p_f = self._p_star_cache[mask, foot_idx]
+        dz = p_f[:, 2] - p_l[:, 2]
+        dz_abs = dz.abs()
+        bias = (0.5 + self._kappa * dz / self._planner.h_max).clamp(self._b_min, self._b_max)
+        apex_xy = (1.0 - bias).unsqueeze(-1) * p_l[:, :2] + bias.unsqueeze(-1) * p_f[:, :2]
+        c = (self._c_min + self._c_scale * dz_abs).clamp(max=self._c_max)
+        max_z = torch.max(p_l[:, 2], p_f[:, 2])
+        apex_z = 2.0 * (max_z + c) - 0.5 * (p_l[:, 2] + p_f[:, 2])
+        self._apex_cache[mask, foot_idx] = torch.stack([apex_xy[:, 0], apex_xy[:, 1], apex_z], dim=-1)
+
+        z_l = p_l[:, 2]
+        z_f = p_f[:, 2]
+        denom = z_l - 2.0 * apex_z + z_f
+        u_peak = torch.where(denom.abs() > 1e-8, (z_l - apex_z) / denom, 0.5 * torch.ones_like(z_l))
+        self._u_peak_cache[mask, foot_idx] = u_peak
+
     def __call__(
         self,
         env: "ManagerBasedRLEnv",
@@ -476,9 +546,15 @@ class FootholdReward(ManagerTermBase):
         max_fwd_range: float | None = None,
         max_bwd_range: float | None = None,
         sigma_p: float = 10.0,
+        sigma_bezier: float | None = None,
         debug_vis: bool = False,
         sigma_d: float | None = None,
         T_swing: float | None = None,
+        duty_factor: float | None = None,
+        phase_transition_sigma: float | None = None,
+        phase_speed_threshold: float | None = None,
+        warmup_time_range: tuple[float, float] | None = None,
+        swing_contact_weight: float | None = None,
         kappa: float | None = None,
         b_min: float | None = None,
         b_max: float | None = None,
@@ -495,12 +571,9 @@ class FootholdReward(ManagerTermBase):
         foot_center_offset: tuple[float, float, float] | None = None,
         edge_hold_time: float | None = None,
         edge_window: float | None = None,
-        landing_hold_time: float | None = None,
-        landing_hold_weight: float | None = None,
-        progress_gate_min_velocity: float | None = None,
         terrain_names: list[str] | None = None,
     ) -> torch.Tensor:
-        """Compute the combined foothold reward.
+        """Compute the phase-driven foothold reward.
 
         The signature mirrors the config ``params`` keys: Isaac Lab's
         ``_resolve_common_term_cfg`` requires every config param to appear as
@@ -510,149 +583,161 @@ class FootholdReward(ManagerTermBase):
         read directly from the call argument.
         """
         asset = env.scene[self._asset_cfg.name]
+        sigma_b = self._sigma_bezier if sigma_bezier is None else sigma_bezier
 
-        # ---- 1. Foot positions & contact (raw) --------------------------
-        ankle_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3) — ankle
-        body_quat = asset.data.body_quat_w[:, self._asset_cfg.body_ids]  # (N, 2, 4) — foot orientation
-        # Convert the ankle-roll link origin to the sole reference point.
+        # ---- 1. Foot positions & contact --------------------------------
+        ankle_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3)
+        body_quat = asset.data.body_quat_w[:, self._asset_cfg.body_ids]  # (N, 2, 4)
         foot_center_offset_v = self._foot_center_offset.to(dtype=body_quat.dtype)
         offset_w = quat_apply(
             body_quat.reshape(-1, 4),
             foot_center_offset_v.unsqueeze(0).expand(body_quat.shape[0] * body_quat.shape[1], -1),
         ).reshape(-1, 2, 3)
-        foot_center = ankle_pos + offset_w  # (N, 2, 3) — sole reference point
+        foot_center = ankle_pos + offset_w  # (N, 2, 3)
 
         contact_sensor: ContactSensor = env.scene.sensors[self._sensor_cfg.name]
         net_force = contact_sensor.data.net_forces_w_history  # (N, hist, n_bodies_all)
         contact_norm = torch.norm(net_force[:, -1, self._sensor_cfg.body_ids], dim=-1)  # (N, 2)
-        in_contact = contact_norm > 1.0  # (N, 2) 电平: 当前子步是否接触
+        in_contact = contact_norm > 1.0  # (N, 2)
 
-        # ---- 2a. Edge detection: window gating on sensor-integrated times ----
-        # 传感器在 200Hz 下累积 current_air_time / current_contact_time
-        # (内部用 force_threshold 判接触)。用"最小持续时间"窗口做边沿去抖 (替代 EMA):
-        #   - 短毛刺 (< edge_hold_time) 采样到的时间量不够长 → 不触发
-        #   - 真实事件延迟 2-3 个控制步 (40-60ms) 触发
-        #   - 窗口上限 edge_window 保证每个事件只触发一次, 无需上一帧状态
-        air_time = contact_sensor.data.current_air_time[:, self._sensor_cfg.body_ids]  # (N, 2)
         contact_time = contact_sensor.data.current_contact_time[:, self._sensor_cfg.body_ids]  # (N, 2)
-        swing_onset = (air_time > self._edge_hold_time) & (air_time < self._edge_window)  # (N, 2)
         touchdown = (contact_time > self._edge_hold_time) & (contact_time < self._edge_window)  # (N, 2)
 
-        # ---- 2c. Phase-state update --------------------------------------
-        # When a foot loses contact it becomes the new swing leg.
-        #   swing_onset[:, 0] == True  → left foot just lifted  → phase_left=True
-        #   swing_onset[:, 1] == True  → right foot just lifted → phase_left=False
-        envs_to_swap = swing_onset[:, 0] | swing_onset[:, 1]
-        new_phase = swing_onset[:, 0]  # True if left onset, False if right onset
-        self._phase_left_swing = torch.where(envs_to_swap, new_phase, self._phase_left_swing)
-
-        # ---- 3. Common quantities (shared by planning & reward) ----------
+        # ---- 2. Common quantities ---------------------------------------
         root_pos = asset.data.root_pos_w  # (N, 3)
-        root_quat = asset.data.root_quat_w  # (N, 4) w,x,y,z
-        # base_velocity's planar components are already expressed in the
-        # yaw-aligned body frame used by the heightmap and DCM grid.
-        v_cmd_yaw_local = env.command_manager.get_command("base_velocity")[:, :2]
+        root_quat = asset.data.root_quat_w  # (N, 4)
+        vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3)
+        v_cmd_yaw_local = vel_cmd_full[:, :2]
+        cmd_speed = torch.norm(v_cmd_yaw_local, dim=1)
+        is_walking = cmd_speed > self._phase_speed_threshold
+
         heightmap = self._get_heightmap(env, root_pos)  # (N, 25, 37)
+        com_pos_w = root_pos
+        com_vel_w = asset.data.root_lin_vel_w
 
-        # Approximate CoM state from root (pelvis) state.
-        com_pos_w = root_pos  # (N, 3)
-        com_vel_w = asset.data.root_lin_vel_w  # (N, 3)
-
-        # ---- 3a. Lazy-init p_star_cache with actual foot positions -------
         newly_uninitialized = ~self._p_star_initialized
         if newly_uninitialized.any():
-            self._p_star_cache[newly_uninitialized, 0] = foot_center[newly_uninitialized, 0]
-            self._p_star_cache[newly_uninitialized, 1] = foot_center[newly_uninitialized, 1]
+            self._p_star_cache[newly_uninitialized] = foot_center[newly_uninitialized]
             self._p_star_initialized[newly_uninitialized] = True
 
-        # ---- 动态 k：从高度图前方 fwd_dist 与中心的高度差除以 T ----
-        fwd_dist = 0.2  # 向前采样距离 (m)
+        fwd_dist = 0.2
         h_safe = torch.where(torch.isnan(heightmap), torch.zeros_like(heightmap), heightmap)
-        row_c, col_c = heightmap.shape[1] // 2, heightmap.shape[2] // 2  # 中心 (y=0, x=0)
-        col_f = col_c + int(round(fwd_dist / self._planner.cell_size))  # 前方 fwd_dist
-        col_f = min(max(col_f, 1), heightmap.shape[2] - 2)  # clamp 防越界
-        center_patch = h_safe[:, row_c - 1 : row_c + 2, col_c - 1 : col_c + 2]  # (N, 3, 3)
-        fwd_patch = h_safe[:, row_c - 1 : row_c + 2, col_f - 1 : col_f + 2]  # (N, 3, 3)
-        h_center = center_patch.mean(dim=(1, 2))  # (N,)
-        h_fwd = fwd_patch.mean(dim=(1, 2))  # (N,)
+        row_c, col_c = heightmap.shape[1] // 2, heightmap.shape[2] // 2
+        col_f = col_c + int(round(fwd_dist / self._planner.cell_size))
+        col_f = min(max(col_f, 1), heightmap.shape[2] - 2)
+        center_patch = h_safe[:, row_c - 1 : row_c + 2, col_c - 1 : col_c + 2]
+        fwd_patch = h_safe[:, row_c - 1 : row_c + 2, col_f - 1 : col_f + 2]
+        h_center = center_patch.mean(dim=(1, 2))
+        h_fwd = fwd_patch.mean(dim=(1, 2))
         k = (h_fwd - h_center) / self._planner.T
         if self._debug_vis:
             self._last_h_center = h_center.detach().clone()
             self._last_h_fwd = h_fwd.detach().clone()
             self._last_fwd_dist = fwd_dist
 
-        # ---- 3b. Cache update: plan ONLY at swing onset for each foot ----
-        # Left foot swing onset  → plan left-foot target (stance = right foot, sign = +1)
-        # Right foot swing onset → plan right-foot target (stance = left foot, sign = -1)
+        # ---- 3. Phase clock (open-loop, walking only) -------------------
+        became_walking = is_walking & ~self._walking_last
+        became_standing = (~is_walking) & self._walking_last
+
+        if became_walking.any():
+            n_bw = int(became_walking.sum().item())
+            self._warmup_remaining[became_walking] = self._sample_warmup(n_bw, env.device)
+            self._phase_active[became_walking] = False
+            self._swing_planned[became_walking] = False
+
+        if became_standing.any():
+            self._phase_active[became_standing] = False
+            self._swing_planned[became_standing] = False
+            self._warmup_remaining[became_standing] = 0.0
+
+        warming = is_walking & ~self._phase_active
+        if warming.any():
+            self._warmup_remaining[warming] = self._warmup_remaining[warming] - env.step_dt
+        warmup_done = warming & (self._warmup_remaining <= 0.0)
+
+        prev_phase = self._gait_phase.clone()
+        advance_mask = is_walking & self._phase_active
+        if advance_mask.any():
+            self._gait_phase[advance_mask] = (
+                self._gait_phase[advance_mask] + self._gait_frequency * env.step_dt
+            ) % 1.0
+
+        start_left = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        if warmup_done.any():
+            n_wd = int(warmup_done.sum().item())
+            start_left[warmup_done] = torch.rand(n_wd, device=env.device) > 0.5
+            self._next_left_swing[warmup_done] = start_left[warmup_done]
+            # Left swing onset: φ_L = duty; right swing onset: φ_L = 0 → φ_R = duty.
+            self._gait_phase[warmup_done] = torch.where(
+                start_left[warmup_done],
+                torch.full((n_wd,), self._duty_factor, device=env.device),
+                torch.zeros(n_wd, device=env.device),
+            )
+            self._phase_active[warmup_done] = True
+            self._warmup_remaining[warmup_done] = 0.0
+
+        self._walking_last = is_walking
+
+        phase_L = self._gait_phase
+        phase_R = (self._gait_phase + self._phase_offset) % 1.0
+        phases = torch.stack([phase_L, phase_R], dim=1)  # (N, 2)
+        prev_phases = torch.stack(
+            [prev_phase, (prev_phase + self._phase_offset) % 1.0],
+            dim=1,
+        )
+        contact_prob = self._expected_contact_prob(phases)  # (N, 2)
+        swing_weight = 1.0 - contact_prob  # (N, 2)
+
+        phase_onset = torch.stack(
+            [
+                self._crossed_into_swing(prev_phases[:, 0], phases[:, 0]),
+                self._crossed_into_swing(prev_phases[:, 1], phases[:, 1]),
+            ],
+            dim=1,
+        )
+        if warmup_done.any():
+            phase_onset[warmup_done, 0] = phase_onset[warmup_done, 0] | start_left[warmup_done]
+            phase_onset[warmup_done, 1] = phase_onset[warmup_done, 1] | (~start_left[warmup_done])
+
+        # Only active walking envs produce scheduling edges.
+        phase_onset = phase_onset & self._phase_active.unsqueeze(-1)
+        self._phase_left_swing = phases[:, 0] >= self._duty_factor
+
+        # ---- 4. Plan DCM targets at phase swing-onset -------------------
         for foot_idx in range(2):
-            mask = swing_onset[:, foot_idx]
-            if mask.any():
-                if foot_idx == 0:  # left foot
-                    p_new = self._planner.plan_in_world(
-                        heightmap[mask],
-                        v_cmd_yaw_local[mask],
-                        foot_center[mask, 1],
-                        root_pos[mask],
-                        root_quat[mask],
-                        torch.ones(mask.sum(), device=env.device),
-                        com_pos_w=com_pos_w[mask],
-                        com_vel_w=com_vel_w[mask],
-                        k=k[mask],
-                    )
-                    self._p_star_cache[mask, 0] = p_new
-                else:  # right foot
-                    p_new = self._planner.plan_in_world(
-                        heightmap[mask],
-                        v_cmd_yaw_local[mask],
-                        foot_center[mask, 0],
-                        root_pos[mask],
-                        root_quat[mask],
-                        -torch.ones(mask.sum(), device=env.device),
-                        com_pos_w=com_pos_w[mask],
-                        com_vel_w=com_vel_w[mask],
-                        k=k[mask],
-                    )
-                    self._p_star_cache[mask, 1] = p_new
-                self._swing_planned[mask, foot_idx] = True
-                self._landing_hold_started[mask, foot_idx] = False
-                self._landing_hold_remaining[mask, foot_idx] = 0.0
+            onset_mask = phase_onset[:, foot_idx]
+            if not onset_mask.any():
+                continue
+            stance_idx = 1 - foot_idx
+            can_plan = onset_mask & in_contact[:, stance_idx]
+            if not can_plan.any():
+                # No contralateral stance contact → skip DCM for this onset.
+                self._swing_planned[onset_mask, foot_idx] = False
+                continue
 
-                # ---- Bézier setup at swing onset (shared state) ----
-                # Record lift-off position (P0)
-                self._lift_off_pos[mask, foot_idx] = foot_center[mask, foot_idx]
-                # Reset swing timer
-                self._swing_elapsed[mask, foot_idx] = 0.0
+            swing_sign = 1.0 if foot_idx == 0 else -1.0
+            p_new = self._planner.plan_in_world(
+                heightmap[can_plan],
+                v_cmd_yaw_local[can_plan],
+                foot_center[can_plan, stance_idx],
+                root_pos[can_plan],
+                root_quat[can_plan],
+                torch.full((int(can_plan.sum().item()),), swing_sign, device=env.device),
+                com_pos_w=com_pos_w[can_plan],
+                com_vel_w=com_vel_w[can_plan],
+                k=k[can_plan],
+            )
+            self._p_star_cache[can_plan, foot_idx] = p_new
+            self._swing_planned[can_plan, foot_idx] = True
+            # Onsets that fail can_plan stay unplanned.
+            failed = onset_mask & ~can_plan
+            if failed.any():
+                self._swing_planned[failed, foot_idx] = False
+            self._cache_bezier_geometry(can_plan, foot_idx, foot_center)
 
-                # Compute apex position (P1, Eq 7 + Eq 9)
-                p_l = self._lift_off_pos[mask, foot_idx]  # (M, 3) lift-off
-                p_f = self._p_star_cache[mask, foot_idx]  # (M, 3) target
-                dz = p_f[:, 2] - p_l[:, 2]  # (M,)
-                dz_abs = dz.abs()
-                # Bias (Eq 7)
-                bias = (0.5 + self._kappa * dz / self._planner.h_max).clamp(self._b_min, self._b_max)
-                # Apex xy interpolated (Eq 7)
-                apex_xy = (1.0 - bias).unsqueeze(-1) * p_l[:, :2] + bias.unsqueeze(-1) * p_f[:, :2]
-                # Clearance (Eq 9)
-                c = (self._c_min + self._c_scale * dz_abs).clamp(max=self._c_max)
-                # Apex z (Eq 9): z_apex = 2*(max(z_l,z_f) + c) - 0.5*(z_l + z_f)
-                max_z = torch.max(p_l[:, 2], p_f[:, 2])  # (M,)
-                apex_z = 2.0 * (max_z + c) - 0.5 * (p_l[:, 2] + p_f[:, 2])
-                self._apex_cache[mask, foot_idx] = torch.stack([apex_xy[:, 0], apex_xy[:, 1], apex_z], dim=-1)
-
-                # u_peak (Eq 10) — where tangent is vertical
-                z_l = p_l[:, 2]
-                z_f = p_f[:, 2]
-                z_a = apex_z
-                denom = z_l - 2.0 * z_a + z_f
-                u_peak = torch.where(denom.abs() > 1e-8, (z_l - z_a) / denom, 0.5 * torch.ones_like(z_l))
-                self._u_peak_cache[mask, foot_idx] = u_peak
-
-        # -- Cost-channel visualisation (full planning each frame, cache NOT updated) --
+        # -- Cost-channel visualisation (full planning each frame) --
         if self._debug_vis and self._cost_visualizer is not None:
-            (
-                p_left_swing_vis,
-                self._channels_left,
-            ) = self._planner.plan_with_channels_in_world(
+            _, self._channels_left = self._planner.plan_with_channels_in_world(
                 heightmap,
                 v_cmd_yaw_local,
                 foot_center[:, 1],
@@ -663,10 +748,7 @@ class FootholdReward(ManagerTermBase):
                 com_vel_w=com_vel_w,
                 k=k,
             )
-            (
-                p_right_swing_vis,
-                self._channels_right,
-            ) = self._planner.plan_with_channels_in_world(
+            _, self._channels_right = self._planner.plan_with_channels_in_world(
                 heightmap,
                 v_cmd_yaw_local,
                 foot_center[:, 0],
@@ -680,155 +762,101 @@ class FootholdReward(ManagerTermBase):
             self._last_heightmap = heightmap
             self._last_root_pos = root_pos
             self._last_root_quat = root_quat
-            self._last_L_nom = self._channels_left["L_nom"]  # (N, 1, 1)
-            self._last_W_nom_left = self._channels_left["W_nom"]  # (N, 1, 1)  swing_leg_sign=+1 → +lp
-            self._last_W_nom_right = self._channels_right["W_nom"]  # (N, 1, 1)  swing_leg_sign=-1 → -lp
+            self._last_L_nom = self._channels_left["L_nom"]
+            self._last_W_nom_left = self._channels_left["W_nom"]
+            self._last_W_nom_right = self._channels_right["W_nom"]
 
-        # ---- 4. Reward components (proximity + bezier, weighted internally) ----
-        # ---- 4a. Swing-phase level (touchdown edge already computed in 2a) ---
-        is_swinging = ~in_contact  # (N, 2) 电平: 当前子步是否在空中
-
-        # ---- 4b. Swing elapsed timer (always updated; drives bezier tracking window) --
-        self._swing_elapsed += env.step_dt * is_swinging.float()  # (N, 2)
-
-        vel_cmd_full = env.command_manager.get_command("base_velocity")  # (N, 3) body frame
-        cmd_xy = vel_cmd_full[:, :2]
-        cmd_speed = torch.norm(cmd_xy, dim=1)
-        cmd_dir = cmd_xy / cmd_speed.unsqueeze(-1).clamp(min=1e-6)
-        commanded_direction_speed = (asset.data.root_lin_vel_b[:, :2] * cmd_dir).sum(dim=1)
-        progress_denominator = (cmd_speed - self._progress_gate_min_velocity).clamp(min=1e-6)
-        progress_gate = ((commanded_direction_speed - self._progress_gate_min_velocity) / progress_denominator).clamp(
-            0.0, 1.0
-        )
-        progress_gate = torch.where(
-            cmd_speed > self._progress_gate_min_velocity,
-            progress_gate,
-            torch.zeros_like(progress_gate),
-        )
-
-        # touchdown 门控 (与 td_mask 同源): 仅当该脚确有摆动计划时才视为真实触地事件。
-        # 排除 reset 后传感器时间量重新累积产生的假触地 (reset 时 swing_planned 已清零)。
+        # ---- 5. Rewards -------------------------------------------------
         touchdown_active = touchdown & self._swing_planned  # (N, 2)
-        landing_start = touchdown_active & ~self._landing_hold_started
-        if landing_start.any():
-            self._landing_hold_started[landing_start] = True
-            self._landing_hold_remaining[landing_start] = self._landing_hold_time
-
+        dense_scale = env.step_dt / self._T_swing
         reward = torch.zeros(env.num_envs, device=env.device)
-        for foot_idx in range(2):
-            # Shared swing-phase masks (both components vote on the same swing)
-            td_mask = touchdown_active[:, foot_idx]  # (N,)
+        active_env = self._phase_active  # walking + past warm-up
 
-            # ---- 4c-i. Dense reward: Bézier per-frame tracking --------------------
-            # --- Tracking reward during the planned swing duration ----------
-            tracking_mask = (
-                is_swinging[:, foot_idx]
-                & self._swing_planned[:, foot_idx]
-                & (self._swing_elapsed[:, foot_idx] <= self._T_swing)
+        for foot_idx in range(2):
+            # Continuous swing-contact force penalty (phase-weighted).
+            force_ratio = (contact_norm[:, foot_idx] / self._robot_weight).clamp(0.0, 1.0)
+            reward = reward - (
+                dense_scale
+                * self._swing_contact_weight
+                * swing_weight[:, foot_idx]
+                * (force_ratio**2)
+                * active_env.float()
             )
-            if tracking_mask.any():
-                # Quintic-smoothstep time warping (zero endpoint vel/acc).
-                u_time_clamped = (self._swing_elapsed[tracking_mask, foot_idx] / self._T_swing).clamp(0.0, 1.0)
-                u = u_time_clamped**3 * (10.0 - 15.0 * u_time_clamped + 6.0 * u_time_clamped**2)
+
+            # Dense Bézier tracking while a plan is active (stops on touchdown).
+            tracking_mask = self._swing_planned[:, foot_idx] & active_env
+            if self._bezier_weight > 0.0 and tracking_mask.any():
+                s = self._swing_progress(phases[tracking_mask, foot_idx])
+                u = s**3 * (10.0 - 15.0 * s + 6.0 * s**2)
                 u_unsq = u.unsqueeze(-1)
 
                 P0 = self._lift_off_pos[tracking_mask, foot_idx]
                 P1 = self._apex_cache[tracking_mask, foot_idx]
                 P2 = self._p_star_cache[tracking_mask, foot_idx]
-
                 one_minus_u = 1.0 - u_unsq
                 p_bezier = one_minus_u**2 * P0 + 2.0 * one_minus_u * u_unsq * P1 + u_unsq**2 * P2
 
                 pos_err = foot_center[tracking_mask, foot_idx] - p_bezier
                 pos_err_sq = (pos_err**2).sum(dim=-1)
 
-                # Orientation error (optional)
                 if self._sigma_d > 0.0:
                     p_dot = 2.0 * one_minus_u * (P1 - P0) + 2.0 * u_unsq * (P2 - P1)
                     p_dot_norm = torch.norm(p_dot, dim=-1, keepdim=True).clamp(min=1e-8)
                     p_dot_unit = p_dot / p_dot_norm
-
-                    u_peak_val = self._u_peak_cache[tracking_mask, foot_idx].unsqueeze(-1)
-                    pre_mask = (u >= u_peak_val.squeeze(-1) - self._delta_l_minus) & (
-                        u < u_peak_val.squeeze(-1) - self._delta_l_plus
-                    )
+                    u_peak_val = self._u_peak_cache[tracking_mask, foot_idx]
+                    pre_mask = (u >= u_peak_val - self._delta_l_minus) & (u < u_peak_val - self._delta_l_plus)
                     t_hat_pre = torch.stack([p_dot_unit[:, 2], p_dot_unit[:, 1], -p_dot_unit[:, 0]], dim=-1)
-                    t_hat_pre = t_hat_pre / (torch.norm(t_hat_pre, dim=-1, keepdim=True).clamp(min=1e-8))
+                    t_hat_pre = t_hat_pre / torch.norm(t_hat_pre, dim=-1, keepdim=True).clamp(min=1e-8)
                     t_hat = torch.where(pre_mask.unsqueeze(-1), t_hat_pre, torch.zeros_like(p_dot_unit))
-                    post_mask = (u > u_peak_val.squeeze(-1) + self._delta_r_minus) & (
-                        u <= u_peak_val.squeeze(-1) + self._delta_r_plus
-                    )
+                    post_mask = (u > u_peak_val + self._delta_r_minus) & (u <= u_peak_val + self._delta_r_plus)
                     t_hat = torch.where(post_mask.unsqueeze(-1), p_dot_unit, t_hat)
 
                     foot_quat = body_quat[tracking_mask, foot_idx]
                     e_x = torch.tensor([1.0, 0.0, 0.0], device=foot_quat.device, dtype=foot_quat.dtype)
-                    e_x = e_x.unsqueeze(0).expand(tracking_mask.sum(), -1)
+                    e_x = e_x.unsqueeze(0).expand(int(tracking_mask.sum().item()), -1)
                     d_hat_f = quat_apply(foot_quat, e_x)
-                    ori_active = (pre_mask | post_mask).unsqueeze(-1).float()
-                    ori_err_sq = ((d_hat_f - t_hat) ** 2).sum(dim=-1) * ori_active.squeeze(-1)
+                    ori_active = (pre_mask | post_mask).float()
+                    ori_err_sq = ((d_hat_f - t_hat) ** 2).sum(dim=-1) * ori_active
                 else:
                     ori_err_sq = 0.0
 
-                # Progress-gated tracking reward: u × exp(−σ_p·d² − σ_d·e_ori)
-                # Multiplying by u eliminates the reward-hacking loophole:
-                # at the slow-start phase (u ≈ 0) the robot gets ~0 reward
-                # regardless of tracking quality → must actually advance the
-                # swing to earn meaningful reward.
-                tracking_quality = torch.exp(-sigma_p * pos_err_sq - self._sigma_d * ori_err_sq)
-                reward[tracking_mask] += self._bezier_weight * u * tracking_quality * progress_gate[tracking_mask]
+                tracking_quality = torch.exp(-sigma_b * pos_err_sq - self._sigma_d * ori_err_sq)
+                bounded = 2.0 * tracking_quality - 1.0
+                reward[tracking_mask] = reward[tracking_mask] + (
+                    dense_scale
+                    * self._bezier_weight
+                    * swing_weight[tracking_mask, foot_idx]
+                    * u
+                    * bounded
+                )
 
-            # ---- 4c-ii. Sparse reward: one-shot proximity at touchdown ----------
+            # One-shot foothold accuracy at real touchdown, gated by C(φ).
+            td_mask = touchdown_active[:, foot_idx] & active_env
             if self._proximity_weight > 0.0 and td_mask.any():
-                dist = foot_center[td_mask, foot_idx] - self._p_star_cache[td_mask, foot_idx]  # (M, 3)
-                dist_sq = (dist**2).sum(dim=-1)  # (M,)
-                foot_reward = torch.exp(-sigma_p * dist_sq)  # (M,)
-                reward[td_mask] += self._proximity_weight * foot_reward
-
-            hold_mask = (
-                in_contact[:, foot_idx]
-                & self._landing_hold_started[:, foot_idx]
-                & (self._landing_hold_remaining[:, foot_idx] > 0.0)
-            )
-            if self._landing_hold_weight > 0.0 and hold_mask.any():
-                dist = foot_center[hold_mask, foot_idx] - self._p_star_cache[hold_mask, foot_idx]
+                dist = foot_center[td_mask, foot_idx] - self._p_star_cache[td_mask, foot_idx]
                 dist_sq = (dist**2).sum(dim=-1)
-                reward[hold_mask] += self._landing_hold_weight * torch.exp(-sigma_p * dist_sq)
+                foot_reward = contact_prob[td_mask, foot_idx] * torch.exp(-sigma_p * dist_sq)
+                reward[td_mask] = reward[td_mask] + self._proximity_weight * foot_reward
 
-            self._landing_hold_remaining[hold_mask, foot_idx] = torch.clamp(
-                self._landing_hold_remaining[hold_mask, foot_idx] - env.step_dt,
-                min=0.0,
-            )
-
-            # ---- 4c-iii. Clear swing flags on touchdown (phase machine cleanup) ---
             if td_mask.any():
                 self._swing_planned[td_mask, foot_idx] = False
 
-        # ---- 4c. Velocity-condition gate -----------------------------------
-        has_lin_vel = torch.norm(vel_cmd_full[:, :2], dim=1) > 0.05  # (N,)
-        reward = torch.where(has_lin_vel, reward, reward * 0.0)
-
-        # ---- 4d'. Terrain-specific gating ---------------------------------
         if self._terrain_names is not None:
             self._update_terrain_mask(env)
             if self._terrain_mask is not None:
-                reward = reward * self._terrain_mask
+                reward = reward * self._terrain_mask.float()
 
-        # (边沿检测为无状态窗口触发, 无需持久化上一帧接触状态)
-
-        # ---- 4e. Cache frame data for _debug_vis_callback -----------------
+        # ---- 6. Debug frame cache ---------------------------------------
         self._last_foot_center = foot_center.clone()
         self._last_contact = in_contact.clone()
         self._last_touchdown = touchdown_active.clone()
-        self._last_swing_onset = swing_onset.clone()
+        self._last_swing_onset = phase_onset.clone()
 
-        # ---- Event flash timer update ------------------------------------
         if self._debug_vis and hasattr(self, "_event_timer"):
-            # Reset timers on new events (flash duration in frames)
-            self._event_timer[swing_onset[:, 0], 0] = 10  # left  foot swing onset
-            self._event_timer[touchdown_active[:, 0], 1] = 15  # left  foot touchdown
-            self._event_timer[swing_onset[:, 1], 2] = 10  # right foot swing onset
-            self._event_timer[touchdown_active[:, 1], 3] = 15  # right foot touchdown
-            # Decrement active timers (clamped to zero)
+            self._event_timer[phase_onset[:, 0], 0] = 10
+            self._event_timer[touchdown_active[:, 0], 1] = 15
+            self._event_timer[phase_onset[:, 1], 2] = 10
+            self._event_timer[touchdown_active[:, 1], 3] = 15
             self._event_timer = (self._event_timer - 1).clamp(min=0)
 
         return reward  # (N,)
@@ -1164,21 +1192,27 @@ class FootholdReward(ManagerTermBase):
         """Reset per-env caches (called by RewardManager on env reset)."""
         if env_ids is None:
             env_ids = slice(None)
-        self._p_star_cache[env_ids] = 0.0
-        self._p_star_initialized[env_ids] = False
-        # Phase-state reset: default to left-swing; randomise for symmetry.
         if isinstance(env_ids, slice):
-            n = self._phase_left_swing.shape[0]
+            n = self._gait_phase.shape[0]
+            device = self._gait_phase.device
         else:
             n = env_ids.numel()
-        self._phase_left_swing[env_ids] = torch.rand(n, device=self._phase_left_swing.device) > 0.5
+            device = self._gait_phase.device
+
+        self._p_star_cache[env_ids] = 0.0
+        self._p_star_initialized[env_ids] = False
         self._swing_planned[env_ids] = False
-        self._swing_elapsed[env_ids] = 0.0
         self._lift_off_pos[env_ids] = 0.0
         self._apex_cache[env_ids] = 0.0
         self._u_peak_cache[env_ids] = 0.0
-        self._landing_hold_remaining[env_ids] = 0.0
-        self._landing_hold_started[env_ids] = False
+
+        self._gait_phase[env_ids] = 0.0
+        self._phase_active[env_ids] = False
+        self._walking_last[env_ids] = False
+        self._next_left_swing[env_ids] = False
+        self._warmup_remaining[env_ids] = self._sample_warmup(n, device)
+        self._phase_left_swing[env_ids] = True
+
         if hasattr(self, "_event_timer"):
             self._event_timer[env_ids] = 0
         self._terrain_mask = None

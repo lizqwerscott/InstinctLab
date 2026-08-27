@@ -768,12 +768,9 @@ class G1Rewards:
         },
     )
 
-    # 单个合并奖励 (方案B): 外部 weight=总权重, 内部 proximity/bezier 权重区分状态。
-    #   状态切换 (只改内部权重):
-    #     proximity_weight=1.0, bezier_weight=0.0 → 仅原始一次性触地奖励
-    #     proximity_weight=0.0, bezier_weight=1.0 → 仅 Bézier 连续摆腿跟踪
-    #     proximity_weight=1.0, bezier_weight=1.0 → 两者叠加 (默认)
-    # 两个分量共享同一 DCM 规划器/相位机/落点缓存 (单实例, 无重复计算)。
+    # 单个合并奖励: 外部 weight=总权重, 内部 proximity/bezier 权重区分分量。
+    # 相位驱动 (HugWBC-style): 固定步态周期提供期望轨迹, 真实接触确认 touchdown
+    # 并门控 DCM 规划 (对侧支撑脚必须接触)。
     foothold = RewTerm(
         func=mdp.FootholdReward,
         weight=10.0,  # 总奖励权重 (课程 foothold_weight 会 ramp 这个值)
@@ -790,9 +787,15 @@ class G1Rewards:
             "max_fwd_range": 0.6,
             "max_bwd_range": 0.0,
             "sigma_p": 10.0,
-            # Bézier 参数 (bezier_weight>0 时生效; 默认值与 __init__ 一致)
+            "sigma_bezier": 50.0,
+            # Bézier / 相位参数 (T_swing 是相位、Bézier、DCM、dense scale 的唯一时间真值)
             "sigma_d": 0.0,
             "T_swing": 0.45,
+            "duty_factor": 0.5,
+            "phase_transition_sigma": 0.04,
+            "phase_speed_threshold": 0.05,
+            "warmup_time_range": (0.05, 0.15),
+            "swing_contact_weight": 0.2,
             "kappa": 0.4,
             "b_min": 0.25,
             "b_max": 0.75,
@@ -803,9 +806,6 @@ class G1Rewards:
             "delta_l_plus": 0.05,
             "delta_r_minus": 0.05,
             "delta_r_plus": 0.25,
-            "landing_hold_time": 0.12,
-            "landing_hold_weight": 1.0,
-            "progress_gate_min_velocity": 0.10,
             "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
