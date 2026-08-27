@@ -615,7 +615,7 @@ class FootholdReward(ManagerTermBase):
         if gait_term is not None:
             gait_freq = gait_term.filtered_frequency[:, 0]   # (N,) stride freq (Hz)
             gait_ratio = gait_term.filtered_ratio[:, 0]      # (N,) single-support ratio
-            in_window = gait_term.swing_window()             # (N, 2) per-leg swing windows
+            in_window = gait_term.swing_window              # (N, 2) per-leg swing windows
             T_swing_eff = (gait_ratio / (2.0 * gait_freq)).clamp(min=0.1)  # (N,)
         else:
             in_window = torch.ones_like(swing_onset)

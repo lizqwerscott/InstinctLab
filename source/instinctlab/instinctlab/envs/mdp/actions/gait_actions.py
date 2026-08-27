@@ -148,7 +148,7 @@ class GaitFrequencyAction(ActionTerm):
     def ss_ds_sign(self) -> torch.Tensor:
         """Phase sign with shape (num_envs, 1): +1 while a leg is inside its swing
         window (single support), -1 in the double-support gaps (cf. Egle 2024)."""
-        return torch.where(self.swing_window().any(dim=-1, keepdim=True), 1.0, -1.0)
+        return torch.where(self.swing_window.any(dim=-1, keepdim=True), 1.0, -1.0)
 
     def process_actions(self, actions: torch.Tensor) -> None:
         self._raw_actions[:] = actions
