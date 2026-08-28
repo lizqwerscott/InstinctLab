@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import numpy as np
-import torch
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import cv2
+import numpy as np
+import torch
 
 import isaaclab.utils.math as math_utils
 from isaaclab.envs.mdp.events import (  # This could be dangerous for code maintainability. Maybe optimize this import later.
@@ -42,6 +43,14 @@ def _debug_visualize_image(
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.imshow(window_name, img)
     cv2.waitKey(1)
+
+
+def _save_depth_image(image: torch.Tensor, path: Path) -> None:
+    """Save a normalized single-channel depth image as an 8-bit PNG."""
+    depth_image = torch.nan_to_num(image.detach(), nan=0.0, posinf=1.0, neginf=0.0)
+    depth_image = depth_image.clamp(0.0, 1.0).mul(255).to(torch.uint8).cpu().numpy()
+    if not cv2.imwrite(str(path), depth_image):
+        raise RuntimeError(f"Failed to save depth image to {path}")
 
 
 def visualizable_image(
@@ -132,6 +141,21 @@ class delayed_visualizable_image(ManagerTermBase):
             f" {self.sensor.data.output[self.data_type].shape}"
         )
         self.sensor_history_length = self.sensor.data.output[self.data_type].shape[1]
+        self.save_images = cfg.params.get("save_images", False)
+        self.save_image_interval = max(cfg.params.get("save_image_interval", 1), 1)
+        self.save_env_id = cfg.params.get("save_env_id", 0)
+        self._saved_image_count = 0
+        self._observation_call_count = 0
+        self.handled_data_type = self.data_type.replace("_noised_history", "_handled_history")
+        if self.save_images:
+            if self.handled_data_type == self.data_type or self.handled_data_type not in self.sensor.data.output:
+                raise ValueError(
+                    "Saving paired depth images requires both '<data_type>_noised_history' and "
+                    "'<data_type>_handled_history' sensor outputs."
+                )
+            self.save_image_dir = Path(cfg.params.get("save_image_dir", "logs/depth_debug")).expanduser()
+            (self.save_image_dir / "noised").mkdir(parents=True, exist_ok=True)
+            (self.save_image_dir / "handled").mkdir(parents=True, exist_ok=True)
 
         # build frame offset based on num_output_frames and history_skip_frames
         # use reverse order because [:, -1] gets the latest frame in sensor data. frame_offset[0] should be the largest
@@ -189,6 +213,16 @@ class delayed_visualizable_image(ManagerTermBase):
             -1
         )  # (N,)
 
+    def _save_image_pair(self, noised_frames: torch.Tensor, handled_frames: torch.Tensor) -> None:
+        """Save the selected frame for one environment from both depth-image pipelines."""
+        if not 0 <= self.save_env_id < noised_frames.shape[0]:
+            raise ValueError(f"save_env_id {self.save_env_id} is outside [0, {noised_frames.shape[0] - 1}]")
+
+        image_name = f"{self._saved_image_count:08d}.png"
+        _save_depth_image(noised_frames[self.save_env_id, -1], self.save_image_dir / "noised" / image_name)
+        _save_depth_image(handled_frames[self.save_env_id, -1], self.save_image_dir / "handled" / image_name)
+        self._saved_image_count += 1
+
     def __call__(
         self,
         env: ManagerBasedEnv,
@@ -228,6 +262,11 @@ class delayed_visualizable_image(ManagerTermBase):
             .to(torch.long)
         )
         delayed_frames = images[batch_indices, frame_indices]  # (N, num_output_frames, H, W)
+        if self.save_images and self._observation_call_count % self.save_image_interval == 0:
+            handled_images = self.sensor.data.output[self.handled_data_type].squeeze(-1)
+            handled_frames = handled_images[batch_indices, frame_indices]
+            self._save_image_pair(delayed_frames, handled_frames)
+        self._observation_call_count += 1
         if debug_vis:
             # (N, num_output_frames, H, W) -> (num_output_frames, H, N, W) -> (num_output_frames * H, N * W)
             _debug_visualize_image(

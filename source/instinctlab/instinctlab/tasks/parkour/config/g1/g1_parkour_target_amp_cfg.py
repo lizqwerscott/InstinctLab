@@ -76,7 +76,13 @@ motion_reference_cfg = MotionReferenceManagerCfg(
 
 
 ROUGH_TERRAINS_CFG_PLAY = copy.deepcopy(ROUGH_TERRAINS_CFG)
-for sub_terrain_name, sub_terrain_cfg in ROUGH_TERRAINS_CFG_PLAY.sub_terrains.items():
+ROUGH_TERRAINS_CFG_PLAY.sub_terrains = {
+    name: terrain_cfg
+    for name, terrain_cfg in ROUGH_TERRAINS_CFG_PLAY.sub_terrains.items()
+    if name in {"pyramid_stairs", "pyramid_stairs_inv"}
+}
+for sub_terrain_cfg in ROUGH_TERRAINS_CFG_PLAY.sub_terrains.values():
+    sub_terrain_cfg.proportion = 0.5
     sub_terrain_cfg.wall_prob = [0.0, 0.0, 0.0, 0.0]
 
 
@@ -119,6 +125,16 @@ class G1ParkourRoughEnvCfg_PLAY(G1ParkourRoughEnvCfg):
         # post init of parent
         super().__post_init__()
         self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG_PLAY
+        self.commands.base_velocity.velocity_ranges = {
+            name: value
+            for name, value in self.commands.base_velocity.velocity_ranges.items()
+            if name in self.scene.terrain.terrain_generator.sub_terrains
+        }
+        self.commands.base_velocity.random_velocity_terrain = [
+            name
+            for name in self.commands.base_velocity.random_velocity_terrain
+            if name in self.scene.terrain.terrain_generator.sub_terrains
+        ]
         # make a smaller scene for play
         self.scene.num_envs = 1
         # self.viewer = ViewerCfg(
@@ -151,6 +167,16 @@ class G1ParkourStudentRoughEnvCfg_PLAY(G1ParkourStudentRoughEnvCfg):
         # post init of parent
         super().__post_init__()
         self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG_PLAY
+        self.commands.base_velocity.velocity_ranges = {
+            name: value
+            for name, value in self.commands.base_velocity.velocity_ranges.items()
+            if name in self.scene.terrain.terrain_generator.sub_terrains
+        }
+        self.commands.base_velocity.random_velocity_terrain = [
+            name
+            for name in self.commands.base_velocity.random_velocity_terrain
+            if name in self.scene.terrain.terrain_generator.sub_terrains
+        ]
         # make a smaller scene for play
         self.scene.num_envs = 1
         # self.viewer = ViewerCfg(

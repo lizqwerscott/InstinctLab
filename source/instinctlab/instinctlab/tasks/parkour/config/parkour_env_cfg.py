@@ -635,6 +635,10 @@ class StudentObservationsCfg:
                 "num_output_frames": 1,
                 "delayed_frame_ranges": (2, 4),
                 "debug_vis": False,
+                "save_images": True,
+                "save_image_dir": "logs/parkour_depth_debug",
+                "save_image_interval": 1,
+                "save_env_id": 0,
             },
             noise=None,
         )
