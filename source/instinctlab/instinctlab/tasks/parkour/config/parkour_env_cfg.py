@@ -64,7 +64,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=3,
     num_rows=10,
-    num_cols=20,
+    num_cols=10,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=1.0,
@@ -72,7 +72,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     curriculum=True,
     sub_terrains={
         "perlin_rough": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.20,
+            proportion=0.50,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -91,7 +91,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "perlin_rough_stand": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.20,
+            proportion=0.50,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -106,119 +106,6 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
                     num_patches=50,
                     patch_radius=[0.05, 0.10, 0.15, 0.20],
                     max_height_diff=0.05,
-                ),
-            },
-        ),
-        "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.10,
-            step_height_range=(0.05, 0.16),
-            step_width=0.3,
-            platform_width=2.5,
-            border_width=1.0,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
-            wall_height=5.0,
-            wall_thickness=0.05,
-            perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
-                noise_scale=0.05,
-                noise_frequency=20,
-                fractal_octaves=2,
-                fractal_lacunarity=2.0,
-                fractal_gain=0.25,
-                centering=True,
-            ),
-            flat_patch_sampling={
-                "target": FlatPatchSamplingCfg(
-                    num_patches=50,
-                    patch_radius=[0.05, 0.10, 0.15, 0.20],
-                    max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(-0.0, 0.0),
-                ),
-            },
-        ),
-        "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.10,
-            step_height_range=(0.05, 0.16),
-            step_width=0.3,
-            platform_width=2.5,
-            border_width=1.0,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
-            wall_height=5.0,
-            wall_thickness=0.05,
-            perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
-                noise_scale=0.05,
-                noise_frequency=20,
-                fractal_octaves=2,
-                fractal_lacunarity=2.0,
-                fractal_gain=0.25,
-                centering=True,
-            ),
-            flat_patch_sampling={
-                "target": FlatPatchSamplingCfg(
-                    num_patches=50,
-                    patch_radius=[0.05, 0.10, 0.15, 0.20],
-                    max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(-0.0, 0.0),
-                ),
-            },
-        ),
-        "up_down": terrain_gen.PerlinStairsUpDownWithWallsTerrainCfg(
-            proportion=0.20,
-            per_step_height=[0.05, 0.16],
-            per_step_width=2.0,
-            per_step_length=(0.3),
-            num_steps=(4, 8),
-            platform_length=2.5,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
-            wall_height=5.0,
-            wall_thickness=0.05,
-            side_wall_prob=[0.8, 0.8],
-            side_wall_height=5.0,
-            side_wall_thickness=0.05,
-            perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
-                noise_scale=0.05,
-                noise_frequency=20,
-                fractal_octaves=2,
-                fractal_lacunarity=2.0,
-                fractal_gain=0.25,
-                centering=True,
-            ),
-            flat_patch_sampling={
-                "target": FlatPatchSamplingCfg(
-                    num_patches=50,
-                    patch_radius=[0.05, 0.10, 0.15, 0.20],
-                    max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(0.0, 0.0),
-                ),
-            },
-        ),
-        "down_up": terrain_gen.PerlinStairsDownUpTerrainCfg(
-            proportion=0.20,
-            per_step_height=[0.05, 0.16],
-            per_step_width=2.0,
-            per_step_length=(0.3),
-            num_steps=(4, 8),
-            platform_length=2.5,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
-            wall_height=5.0,
-            wall_thickness=0.05,
-            perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
-                noise_scale=0.05,
-                noise_frequency=20,
-                fractal_octaves=2,
-                fractal_lacunarity=2.0,
-                fractal_gain=0.25,
-                centering=True,
-            ),
-            flat_patch_sampling={
-                "target": FlatPatchSamplingCfg(
-                    num_patches=50,
-                    patch_radius=[0.05, 0.10, 0.15, 0.20],
-                    max_height_diff=0.05,
-                    x_range=(3.7, 3.7),
-                    y_range=(0.0, 0.0),
                 ),
             },
         ),
@@ -291,92 +178,6 @@ class SceneCfg(InteractiveSceneCfg):
         ),
         debug_vis=False,
     )
-    camera = NoisyGroupedRayCasterCameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-        mesh_prim_paths=[
-            "/World/ground",
-            # NOTE: Don't forget to add the robot links in robot-specific configuration file.
-        ],
-        ray_alignment="yaw",
-        pattern_cfg=PinholeCameraPatternCfg(
-            focal_length=1.0,
-            horizontal_aperture=2 * math.tan(math.radians(89.51) / 2),  # fovx
-            vertical_aperture=2 * math.tan(math.radians(58.29) / 2),  # fovy
-            width=64,
-            height=36,
-        ),
-        debug_vis=False,
-        data_types=["distance_to_image_plane"],
-        update_period=0.02,
-        depth_clipping_behavior="max",
-        offset=NoisyGroupedRayCasterCameraCfg.OffsetCfg(  # G1 Robot head camera nominal pose
-            pos=(
-                0.0487988662332928,
-                0.01,
-                0.4378029937970051,
-            ),
-            rot=(
-                0.9135367613482678,
-                0.004363309284746571,
-                0.4067366430758002,
-                0.0,
-            ),
-            convention="world",
-        ),
-        min_distance=0.1,
-        # noise
-        noise_pipeline={
-            "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
-            "parametric_depth_noise": ParametricDepthNoiseCfg(
-                focal_length=31.35,
-                baseline=0.05,
-                min_depth=0.2,
-                max_depth=5,
-            ),
-            # "gaussian_noise": RangeBasedGaussianNoiseCfg(noise_std = 0.02, min_value = 0.2, max_value = 1.5),
-            # "stereo_failure": DepthSteroNoiseCfg(
-            #     stero_far_distance=3.0,
-            #     stero_min_distance=0.12,
-            #     stero_far_noise_std=0.08,
-            #     stero_near_noise_std=0.02,
-            #     stero_full_block_artifacts_prob=0.002,
-            #     stero_full_block_values=[0.0, 0.25, 0.5, 1.0, 3.0],
-            #     stero_full_block_height_mean_std=[18, 2.0],
-            #     stero_full_block_width_mean_std=[3, 0.5],
-            #     stero_half_block_spark_prob=0.05,
-            #     stero_half_block_value=3000,
-            # ),
-            "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
-            # "random_gaussian_noise": RandomGaussianNoiseCfg(noise_mean=0.0, noise_std=1, probability=0.05),
-            "depth_normalization": DepthNormalizationCfg(
-                depth_range=(0.0, 2.5),
-                normalize=True,
-                output_range=(0.0, 1.0),
-            ),
-        },
-        image_pipeline={
-            "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
-            "depth_normalization": DepthNormalizationCfg(
-                depth_range=(0.0, 2.5),
-                normalize=True,
-                output_range=(0.0, 1.0),
-            ),
-        },
-        data_histories={
-            "distance_to_image_plane_noised": 37,
-            "distance_to_image_plane_handled": 37,
-        },
-    )
-    heightmap_scanner = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-        # attach_yaw_only=True,
-        ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.05, size=[1.6, 1.0]),
-        debug_vis=False,
-        mesh_prim_paths=["/World/ground"],
-    )
-
     heightmap = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/torso_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
@@ -398,7 +199,6 @@ class SceneCfg(InteractiveSceneCfg):
             texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
         ),
     )
-    motion_reference: MotionReferenceManagerCfg = MISSING
 
 
 @configclass
@@ -413,19 +213,19 @@ class ObservationsCfg:
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
             noise=Unoise(n_min=-0.2, n_max=0.2),
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
             scale=0.25,
         )
         projected_gravity = ObsTerm(
             func=mdp.projected_gravity,
             noise=Unoise(n_min=-0.05, n_max=0.05),
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
         )
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
             params={"command_name": "base_velocity"},
             noise=None,
@@ -433,23 +233,17 @@ class ObservationsCfg:
         joint_pos_rel = ObsTerm(
             func=mdp.joint_pos_rel,
             noise=Unoise(n_min=-0.01, n_max=0.01),
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
         )
         joint_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
             noise=Unoise(n_min=-0.5, n_max=0.5),
             scale=0.05,
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
         )
-        last_action = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
-        height_scan = ObsTerm(
-            func=mdp.height_scan_feat,
-            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
-            history_length=4,
-            noise=None,
-        )
+        last_action = ObsTerm(func=mdp.last_action, history_length=1, flatten_history_dim=True)
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -460,142 +254,38 @@ class ObservationsCfg:
         """Observations for critic group."""
 
         # observation terms (order preserved)
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=8, flatten_history_dim=True)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=1, flatten_history_dim=True)
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
             scale=0.25,
         )
-        projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=8, flatten_history_dim=True)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=1, flatten_history_dim=True)
         velocity_commands = ObsTerm(
             func=mdp.generated_commands,
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
             params={"command_name": "base_velocity"},
             noise=None,
         )
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=8, flatten_history_dim=True)
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=1, flatten_history_dim=True)
         joint_vel = ObsTerm(
             func=mdp.joint_vel_rel,
             scale=0.05,
-            history_length=8,
+            history_length=1,
             flatten_history_dim=True,
         )
-        actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
-        height_scan = ObsTerm(
-            func=mdp.height_scan_feat,
-            params={"sensor_cfg": SceneEntityCfg("heightmap_scanner")},
-            history_length=4,
-            noise=None,
-        )
+        actions = ObsTerm(func=mdp.last_action, history_length=1, flatten_history_dim=True)
 
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = False
 
-    @configclass
-    class AmpPolicyStateObsCfg(ObsGroup):
-        concatenate_terms = False
-        projected_gravity = ObsTerm(
-            func=mdp.projected_gravity,
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-            history_length=10,
-        )
-        joint_pos_rel = ObsTerm(
-            func=mdp.joint_pos_rel,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    name="robot",
-                    preserve_order=True,
-                ),
-            },
-        )
-        joint_vel = ObsTerm(
-            func=mdp.joint_vel_rel,
-            scale=0.05,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    name="robot",
-                    preserve_order=True,
-                ),
-            },
-        )
-        base_lin_vel = ObsTerm(
-            func=mdp.base_lin_vel,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        )
-        base_ang_vel = ObsTerm(
-            func=mdp.base_ang_vel,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        )
-
-    @configclass
-    class AmpReferenceStateObsCfg(ObsGroup):
-        concatenate_terms = False
-        projected_gravity = ObsTerm(
-            func=mdp.projected_gravity_reference_as_state,
-            params={
-                "asset_cfg": SceneEntityCfg(name="motion_reference"),
-            },
-            history_length=10,
-        )
-        joint_pos_rel = ObsTerm(
-            func=mdp.joint_pos_rel_reference_as_state,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg(name="motion_reference"),
-            },
-        )
-        joint_vel = ObsTerm(
-            func=mdp.joint_vel_rel_reference_as_state,
-            scale=0.05,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg(name="motion_reference"),
-            },
-        )
-        base_lin_vel = ObsTerm(
-            func=mdp.base_lin_vel_reference_as_state,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg(name="motion_reference"),
-            },
-        )
-        base_ang_vel = ObsTerm(
-            func=mdp.base_ang_vel_reference_as_state,
-            history_length=10,
-            flatten_history_dim=True,
-            params={
-                "asset_cfg": SceneEntityCfg(name="motion_reference"),
-            },
-        )
-
     # observation group
     policy: PolicyCfg = PolicyCfg()
     # critic group
     critic: CriticCfg = CriticCfg()
-    # AMP training groups
-    amp_policy: AmpPolicyStateObsCfg = AmpPolicyStateObsCfg()
-    amp_reference: AmpReferenceStateObsCfg = AmpReferenceStateObsCfg()
-
 
 @configclass
 class ActionsCfg:
@@ -632,26 +322,6 @@ class CommandsCfg:
                 "lin_vel_x": (0.0, 0.0),
                 "lin_vel_y": (0.0, 0.0),
                 "ang_vel_z": (0.0, 0.0),
-            },
-            "pyramid_stairs": {
-                "lin_vel_x": (0.45, 0.6),
-                "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (-1.0, 1.0),
-            },
-            "pyramid_stairs_inv": {
-                "lin_vel_x": (0.45, 0.8),
-                "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (-1.0, 1.0),
-            },
-            "up_down": {
-                "lin_vel_x": (0.45, 0.6),
-                "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (-1.0, 1.0),
-            },
-            "down_up": {
-                "lin_vel_x": (0.45, 0.8),
-                "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (-1.0, 1.0),
             },
         },
         only_positive_lin_vel_x=True,
@@ -895,16 +565,6 @@ class TerminationsCfg:
     )
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 1.0})
     root_height = DoneTerm(func=mdp.root_height_below_env_origin_minimum, params={"minimum_height": 0.5})
-    dataset_exhausted = DoneTerm(
-        func=instinct_mdp.dataset_exhausted,
-        time_out=True,
-        params={
-            "reference_cfg": SceneEntityCfg("motion_reference"),
-            "print_reason": False,
-            "reset_without_notice": True,
-        },
-    )
-
 
 @configclass
 class EventCfg:
