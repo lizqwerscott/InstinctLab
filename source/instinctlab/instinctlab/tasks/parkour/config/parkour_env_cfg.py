@@ -20,6 +20,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from isaaclab.utils.noise import NoiseModelWithAdditiveBiasCfg
+from isaaclab.utils.noise import GaussianNoiseCfg
 
 import instinctlab.envs.mdp as instinct_mdp
 import instinctlab.tasks.parkour.mdp as mdp
@@ -32,15 +33,14 @@ from instinctlab.terrains import GreedyconcatEdgeCylinderCfg, TerrainImporterCfg
 from instinctlab.utils.noise import (
     CropAndResizeCfg,
     DepthArtifactNoiseCfg,
+    DepthDropoutBiasCfg,
+    DepthInpaintCfg,
     DepthNormalizationCfg,
-    DepthScaleNoiseCfg,
     DepthSteroNoiseCfg,
-    DistanceDependentGaussianNoiseCfg,
     GaussianBlurNoiseCfg,
-    PixelFailureNoiseCfg,
     RandomGaussianNoiseCfg,
     RangeBasedGaussianNoiseCfg,
-    ParametricDepthNoiseCfg,
+    ParametricDepthNoiseCfg
 )
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
@@ -321,13 +321,21 @@ class SceneCfg(InteractiveSceneCfg):
         noise_pipeline={
             "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
             "parametric_depth_noise": ParametricDepthNoiseCfg(
-                focal_length=31.35,
+                focal_length=246.0,
                 baseline=0.05,
                 min_depth=0.2,
                 max_depth=5,
+                prob_range=(0.7, 0.9),
             ),
-            "distance_gaussian": DistanceDependentGaussianNoiseCfg(coefficient_range=(-0.015, 0.015)),
-            "depth_scale": DepthScaleNoiseCfg(scale_range=(0.97, 1.03)),
+            # The deployment node resizes with INTER_AREA over a depth image whose
+            # invalid pixels are still 0, which drags every output pixel toward
+            # zero in proportion to how much of its source block was dropped.
+            # On the real robot that is -8 mm on the far crop row and -96 mm on
+            # the near one, every frame. Nothing in the sim produced it before.
+            "depth_dropout_bias": DepthDropoutBiasCfg(),
+            # Matches cv2.inpaint(img, img < 0.2, INPAINT_NS) in the deployment
+            # node; only fires once depth_dropout_bias pushes a pixel that low.
+            "depth_inpaint": DepthInpaintCfg(threshold=0.2),
             # "gaussian_noise": RangeBasedGaussianNoiseCfg(noise_std = 0.02, min_value = 0.2, max_value = 1.5),
             # "stereo_failure": DepthSteroNoiseCfg(
             #     stero_far_distance=3.0,
@@ -341,10 +349,12 @@ class SceneCfg(InteractiveSceneCfg):
             #     stero_half_block_spark_prob=0.05,
             #     stero_half_block_value=3000,
             # ),
+            # NOT a noise term: the deployment node runs cv2.GaussianBlur((3,3),
+            # sigma=1) on the crop before handing it to the policy, so the sim has
+            # to run it too. Dropping this makes the policy train on sharp edges
+            # and deploy on blurred ones.
+            "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
             # "random_gaussian_noise": RandomGaussianNoiseCfg(noise_mean=0.0, noise_std=1, probability=0.05),
-            # after blur so dead/saturated pixels are not smeared away; max_value matches the
-            # normalization upper bound below so saturated pixels normalize to 1.0
-            "pixel_failure": PixelFailureNoiseCfg(zero_prob=0.001, max_prob=0.001, max_value=2.5),
             "depth_normalization": DepthNormalizationCfg(
                 depth_range=(0.0, 2.5),
                 normalize=True,
@@ -612,7 +622,7 @@ class StudentObservationsCfg:
         )
         joint_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
-            noise=Unoise(n_min=-0.5, n_max=0.5),
+            noise=Unoise(n_min=-2.0, n_max=2.0),
             scale=0.05,
         )
         last_action = ObsTerm(func=mdp.last_action)
@@ -640,14 +650,14 @@ class StudentObservationsCfg:
         # observation terms (order preserved)
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
-            noise=Unoise(n_min=-0.2, n_max=0.2),
+            # noise=Unoise(n_min=-0.2, n_max=0.2),
             history_length=0,
             flatten_history_dim=True,
             scale=0.25,
         )
         projected_gravity = ObsTerm(
             func=mdp.projected_gravity,
-            noise=Unoise(n_min=-0.05, n_max=0.05),
+            # noise=Unoise(n_min=-0.05, n_max=0.05),
             history_length=0,
             flatten_history_dim=True,
         )
@@ -659,11 +669,11 @@ class StudentObservationsCfg:
             noise=None,
         )
         joint_pos_rel = ObsTerm(
-            func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01), history_length=0, flatten_history_dim=True
+            func=mdp.joint_pos_rel, history_length=0, flatten_history_dim=True
         )
         joint_vel_rel = ObsTerm(
             func=mdp.joint_vel_rel,
-            noise=Unoise(n_min=-0.5, n_max=0.5),
+            # noise=Unoise(n_min=-0.5, n_max=0.5),
             scale=0.05,
             history_length=0,
             flatten_history_dim=True,
@@ -1101,23 +1111,23 @@ class EventCfg:
                 "y": (-0.02, 0.02),
                 "z": (-0.02, 0.02),
                 "roll": (-0.08, 0.08),
-                "pitch": (-0.174, 0.174),
+                "pitch": (-0.10, 0.10),
                 "yaw": (-0.05, 0.05)
             },
             "distribution": "uniform"
         },
     )
 
-    camera_intrinsics = EventTerm(
-        func=mdp.randomize_camera_intrinsics,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("camera"),
-            "horizontal_scale_range": (0.90, 1.10),
-            "vertical_scale_range": (0.90, 1.10),
-            "distribution": "uniform",
-        },
-    )
+    # camera_intrinsics = EventTerm(
+    #     func=mdp.randomize_camera_intrinsics,
+    #     mode="startup",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("camera"),
+    #         "horizontal_scale_range": (0.90, 1.10),
+    #         "vertical_scale_range": (0.90, 1.10),
+    #         "distribution": "uniform",
+    #     },
+    # )
 
     # interval
     push_robot = EventTerm(

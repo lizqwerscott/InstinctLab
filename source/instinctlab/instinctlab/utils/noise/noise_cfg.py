@@ -6,7 +6,8 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import NoiseCfg
 
 from .noise_model import (
-    DistanceDependentGaussianNoiseModel,
+    DepthDropoutBiasNoiseModel,
+    DepthInpaintNoiseModel,
     ImageNoiseModel,
     LatencyNoiseModel,
     SensorDeadNoiseModel,
@@ -16,11 +17,9 @@ from .noise_model import (
     depth_artifact_noise,
     depth_contour_noise,
     depth_normalization,
-    depth_scale_noise,
     depth_sky_artifact_noise,
     depth_stero_noise,
     gaussian_blur_noise,
-    pixel_failure_noise,
     random_gaussian_noise,
     range_based_gaussian_noise,
     stereo_too_close_noise,
@@ -146,45 +145,6 @@ class DepthNormalizationCfg(ImageNoiseCfg):
 
     func = depth_normalization
     """The noise model class to apply depth normalization."""
-
-
-@configclass
-class DepthScaleNoiseCfg(ImageNoiseCfg):
-    """Configuration for multiplicative depth scale noise."""
-
-    scale_range: tuple[float, float] = (0.9, 1.1)
-    """The multiplicative depth scale range."""
-
-    func = depth_scale_noise
-
-
-@configclass
-class DistanceDependentGaussianNoiseCfg(ImageNoiseCfg):
-    """Configuration for gaussian noise with quadratically distance-dependent std:
-    sigma(d) = |c0 + c1*d + c2*d^2|, with c0, c1, c2 sampled per environment and
-    resampled on episode reset.
-    """
-
-    coefficient_range: tuple[float, float] = (-0.03, 0.03)
-    """The uniform sampling range for the polynomial coefficients c0, c1, c2."""
-
-    func = DistanceDependentGaussianNoiseModel
-
-
-@configclass
-class PixelFailureNoiseCfg(ImageNoiseCfg):
-    """Configuration for random per-pixel failures (dead and saturated pixels)."""
-
-    zero_prob: float = 0.001
-    """The probability of a pixel reading 0 (dead pixel)."""
-
-    max_prob: float = 0.001
-    """The probability of a pixel reading ``max_value`` (saturated pixel)."""
-
-    max_value: float = 2.5
-    """The depth value a saturated pixel reads."""
-
-    func = pixel_failure_noise
 
 
 @configclass
@@ -315,11 +275,74 @@ class ParametricDepthNoiseCfg(ImageNoiseCfg):
     Thus causing some frames of non-refreshed data.
     """
 
-    focal_length: float = 31.35  # 像素焦距
+    focal_length: float = 246.0
+    """Pixel focal length at which the *real* camera solves disparity -- not the one
+    of this render. Recovered from the depth quantization lattice of 676 real D435
+    frames at 480x270: dz/z^2 = 2.54e-3 /m at 1/32 px disparity steps gives
+    focal_length * baseline = 12.30, so 246 px at 480 width (HFOV 88.6 deg, D435
+    spec 87+-3). The previous 31.35 was the focal length of the 64-wide render and
+    made the quantization step 7.85x coarser than the real sensor's."""
+
     baseline: float = 0.05
     min_depth: float = 0.2
     max_depth: float = 5
 
+    prob_range: tuple[float, float] = (0.7, 0.9)
+    """Fraction of the 3x3 neighbourhood that contributes to each refilled pixel.
+
+    Every output pixel is replaced by the mean of a random subset of its
+    neighbours, so a low fraction injects noise on top of the disparity
+    quantization. The (0.4, 0.6) default left the 18x32 crop 3x rougher than the
+    real camera (high-frequency residual 0.055 vs 0.018 measured pre-blur);
+    (0.7, 0.9) lands on 0.020."""
+
+    inlier_thred_range: tuple[float, float] = (0.01, 0.05)
+    """Threshold on the std-normalized local disparity difference, below which a
+    pixel is kept as an inlier."""
+
     func = ParametricDepthNoiseModel
 
-    
+
+@configclass
+class DepthDropoutBiasCfg(ImageNoiseCfg):
+    """Depth bias the deployment INTER_AREA resize bakes in from invalid pixels.
+
+    Defaults are fitted to 676 frames of real D435 upstairs walking at 480x270.
+    See :class:`DepthDropoutBiasNoiseModel` for the measurement table.
+    """
+
+    q_far: float = 0.0082
+    """Probability that a pixel on the far (top) crop row loses part of its support."""
+
+    q_near: float = 0.2856
+    """Same on the near (bottom) crop row. Measured mean V there is 0.852."""
+
+    row_exponent: float = 3.18
+    """q(row) = q_far + (q_near - q_far) * (row / (H - 1)) ** row_exponent."""
+
+    persistence: float = 0.705
+    """Probability a pixel keeps last frame's valid fraction. Measured lag-1 autocorr."""
+
+    blob_scale: int = 2
+    """Seeds are drawn at 1/blob_scale resolution so dropout comes out clustered."""
+
+    blob_interpolation: str = "bilinear"
+    """How seeds are upsampled to full resolution. The real valid fraction comes out
+    of a 7.5x area average, so its blobs have soft edges; "nearest" gives hard
+    blob_scale-sized steps that no amount of blur removes and leaves the crop
+    rougher than the real camera at the same spatial autocorrelation."""
+
+    func = DepthDropoutBiasNoiseModel
+
+
+@configclass
+class DepthInpaintCfg(ImageNoiseCfg):
+    """Replicates the deployment node's ``cv2.inpaint(img, img < 0.2, INPAINT_NS)``."""
+
+    threshold: float = 0.2
+    """Depth below which a pixel is treated as invalid and refilled, in meters."""
+
+    iterations: int = 4
+    """Valid-neighbour averaging passes. 4 covers the radius-3 inpaint at 18x32."""
+
+    func = DepthInpaintNoiseModel

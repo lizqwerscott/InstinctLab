@@ -19,10 +19,7 @@ if TYPE_CHECKING:
         DepthArtifactNoiseCfg,
         DepthContourNoiseCfg,
         DepthNormalizationCfg,
-        DepthScaleNoiseCfg,
         DepthSkyArtifactNoiseCfg,
-        DistanceDependentGaussianNoiseCfg,
-        PixelFailureNoiseCfg,
         DepthSteroNoiseCfg,
         GaussianBlurNoiseCfg,
         ImageNoiseCfg,
@@ -282,66 +279,6 @@ def depth_normalization(
         data = data.permute(0, 2, 3, 1)
 
     return data
-
-
-def depth_scale_noise(
-    data: torch.Tensor,
-    cfg: DepthScaleNoiseCfg,
-    env_ids: torch.Tensor | Sequence[int],
-) -> torch.Tensor:
-    """Apply a per-frame multiplicative scale to depth images."""
-    scale_shape = (data.shape[0],) + (1,) * (data.ndim - 1)
-    depth_scale = torch_rand_float(
-        cfg.scale_range[0], cfg.scale_range[1], (data.shape[0], 1), device=str(data.device)
-    ).view(scale_shape)
-    return data * depth_scale
-
-
-def pixel_failure_noise(
-    data: torch.Tensor,
-    cfg: PixelFailureNoiseCfg,
-    env_ids: torch.Tensor | Sequence[int],
-) -> torch.Tensor:
-    """Randomly kill individual pixels: dead pixels read 0, saturated pixels read ``max_value``."""
-    max_mask = torch.rand_like(data) < cfg.max_prob
-    data = torch.where(max_mask, torch.full_like(data, cfg.max_value), data)
-    zero_mask = torch.rand_like(data) < cfg.zero_prob
-    return torch.where(zero_mask, torch.zeros_like(data), data)
-
-
-class DistanceDependentGaussianNoiseModel(ImageNoiseModel):
-    """Additive gaussian noise whose std grows quadratically with depth: sigma(d) = |c0 + c1*d + c2*d^2|.
-
-    The coefficients are sampled per environment (to mimic inter-device variations) and
-    resampled on episode reset. Invalid pixels (depth == 0, e.g. stereo holes) are left untouched.
-    """
-
-    def __init__(self, cfg: DistanceDependentGaussianNoiseCfg, num_envs, device):
-        super().__init__(cfg, num_envs, device)
-        self._coefficients = torch.zeros(num_envs, 3, device=device)
-        self.reset()
-
-    def reset(self, env_ids: Sequence[int] | None = None):
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
-        elif not isinstance(env_ids, torch.Tensor):
-            env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
-        self._coefficients[env_ids] = torch_rand_float(
-            self.cfg.coefficient_range[0],
-            self.cfg.coefficient_range[1],
-            (len(env_ids), 3),
-            device=str(self.device),
-        )
-
-    def __call__(self, data: torch.Tensor, cfg: DistanceDependentGaussianNoiseCfg, env_ids: torch.Tensor | Sequence[int]):
-        coefficients = self._coefficients[env_ids]  # (N_, 3)
-        view_shape = (data.shape[0],) + (1,) * (data.ndim - 1)
-        c0 = coefficients[:, 0].view(view_shape)
-        c1 = coefficients[:, 1].view(view_shape)
-        c2 = coefficients[:, 2].view(view_shape)
-        sigma = (c0 + c1 * data + c2 * data.square()).abs()
-        noised = data + torch.randn_like(data) * sigma
-        return torch.where(data > 0, noised, data)
 
 
 class LatencyNoiseModel(ImageNoiseModel):
@@ -784,7 +721,14 @@ class ParametricDepthNoiseModel(ImageNoiseModel):
     def __init__(self, cfg: ParametricDepthNoiseCfg, num_envs, device):
         """Simulating when the sensor is dead and restarting, this may lead to several frames of non-refreshed data."""
         super().__init__(cfg, num_envs, device)
-        self.depth_noise_model = DepthNoise(focal_length=cfg.focal_length, baseline=cfg.baseline, min_depth=cfg.min_depth, max_depth=cfg.max_depth).to(device)
+        self.depth_noise_model = DepthNoise(
+            focal_length=cfg.focal_length,
+            baseline=cfg.baseline,
+            min_depth=cfg.min_depth,
+            max_depth=cfg.max_depth,
+            inlier_thred_range=cfg.inlier_thred_range,
+            prob_range=cfg.prob_range,
+        ).to(device)
         self._data_buffer = None
 
     def __call__(self, data, cfg: ParametricDepthNoiseCfg, env_ids: torch.Tensor | Sequence[int]):
@@ -818,3 +762,122 @@ class ParametricDepthNoiseModel(ImageNoiseModel):
             env_ids = list(range(self.num_envs))
         if self._data_buffer is not None:
             self._data_buffer[env_ids] = 0
+
+
+class DepthDropoutBiasNoiseModel(ImageNoiseModel):
+    """Reproduce the depth bias the deployment resize bakes in from invalid pixels.
+
+    The deployment node downsamples the 480x270 D435 frame to 64x36 with
+    ``cv2.INTER_AREA`` while invalid pixels are still 0. Those zeros enter the
+    average, so every output pixel comes out scaled by the fraction of valid
+    source pixels behind it::
+
+        z_out = z_true * V,   V = (valid source pixels) / (total source pixels)
+
+    Holes never survive as holes -- they turn into depth that reads *closer*
+    than reality, and the effect is strongest exactly where it matters: the
+    bottom rows of the crop, which look at the ground just ahead of the feet.
+
+    Measured on 676 frames of real D435 upstairs walking (480x270, mm):
+
+    ==========  ========  =======  ==================
+    crop row    mean V    std V    mean depth bias
+    ==========  ========  =======  ==================
+    0 (far)     0.994     0.066    -8.5 mm
+    9           0.978     0.107    -19.7 mm
+    17 (near)   0.852     0.284    -96.3 mm
+    ==========  ========  =======  ==================
+
+    ``V = 1 - m * u`` with ``m ~ Bernoulli(q(row))`` and ``u ~ U(0, 1)``
+    reproduces the measured per-row mean *and* std to within 0.01 on all 18
+    rows, with ``q(row) = q_far + (q_near - q_far) * (row / (H - 1)) ** row_exponent``.
+
+    Seeds are drawn at half resolution and nearest-upsampled so the dropout
+    clusters the way the real one does (measured spatial lag-1 autocorrelation
+    of V: 0.53 horizontal, 0.66 vertical), and each pixel keeps its previous
+    value with probability ``persistence`` (measured temporal lag-1
+    autocorrelation: 0.705).
+
+    Run this after ``crop_and_resize`` -- ``q`` is indexed by row of the crop --
+    and before ``gaussian_blur``/``depth_normalization``, matching the order the
+    deployment node applies them in.
+    """
+
+    def __init__(self, cfg: "DepthDropoutBiasCfg", num_envs: int = 1, device: str | torch.device = "cpu"):
+        super().__init__(cfg, num_envs, device)
+        self._valid_fraction: torch.Tensor | None = None
+
+    def reset(self, env_ids: Sequence[int] | None = None):
+        if self._valid_fraction is None:
+            return
+        if env_ids is None:
+            self._valid_fraction.fill_(1.0)
+        else:
+            self._valid_fraction[env_ids] = 1.0
+
+    def __call__(self, data: torch.Tensor, cfg: "DepthDropoutBiasCfg", env_ids: torch.Tensor | Sequence[int]):
+        n, h, w = data.shape[0], data.shape[1], data.shape[2]
+
+        if self._valid_fraction is None or self._valid_fraction.shape[1:] != (h, w):
+            self._valid_fraction = torch.ones((self.num_envs, h, w), dtype=data.dtype, device=data.device)
+
+        rows = torch.arange(h, dtype=data.dtype, device=data.device) / max(h - 1, 1)
+        q_row = cfg.q_far + (cfg.q_near - cfg.q_far) * rows.pow(cfg.row_exponent)
+
+        # Everything is drawn at 1/blob_scale resolution and nearest-upsampled:
+        # whether a block is hit, how much of it is lost, and whether it carries
+        # over from last frame. Drawing any of the three per pixel instead would
+        # break the blocks apart and leave a high-frequency field the real camera
+        # does not produce (measured spatial lag-1 autocorrelation of V is
+        # 0.53 horizontal / 0.66 vertical, which nearest-upsampling by 2-3 gives).
+        hs, ws = max(h // cfg.blob_scale, 1), max(w // cfg.blob_scale, 1)
+        q_seed = torch.nn.functional.interpolate(
+            q_row.view(1, 1, h, 1).expand(1, 1, h, w), size=(hs, ws), mode="area"
+        )
+        hit = torch.rand((n, 1, hs, ws), device=data.device, dtype=data.dtype) < q_seed
+        lost = torch.rand((n, 1, hs, ws), device=data.device, dtype=data.dtype)
+        keep = torch.rand((n, 1, hs, ws), device=data.device, dtype=data.dtype) < cfg.persistence
+
+        fresh = torch.nn.functional.interpolate(
+            torch.where(hit, 1.0 - lost, torch.ones_like(lost)), size=(h, w), mode=cfg.blob_interpolation
+        ).squeeze(1)
+        keep_up = torch.nn.functional.interpolate(
+            keep.to(data.dtype), size=(h, w), mode="nearest"
+        ).squeeze(1) > 0.5
+
+        valid_fraction = torch.where(keep_up, self._valid_fraction[env_ids], fresh)
+        self._valid_fraction[env_ids] = valid_fraction
+
+        return data * valid_fraction.unsqueeze(-1)
+
+
+class DepthInpaintNoiseModel(ImageNoiseModel):
+    """Fill pixels that read closer than ``threshold`` from their valid neighbours.
+
+    Mirrors the ``cv2.inpaint(img, img < 0.2, INPAINT_NS)`` step in the
+    deployment node. It matters once :class:`DepthDropoutBiasNoiseModel` is in
+    the pipeline, because a heavily-dropped pixel can be scaled below the
+    threshold and the real robot would have replaced it rather than shown it to
+    the policy. Iterated 3x3 valid-neighbour averaging stands in for Navier-Stokes
+    inpainting; at 18x32 with a radius-3 kernel the two are close.
+    """
+
+    def __call__(self, data: torch.Tensor, cfg: "DepthInpaintCfg", env_ids: torch.Tensor | Sequence[int]):
+        img = data.permute(0, 3, 1, 2)
+        c = img.shape[1]
+        valid = (img >= cfg.threshold).to(img.dtype)
+        if bool(valid.min() > 0):
+            return data
+
+        filled = img * valid
+        kernel = torch.ones((c, 1, 3, 3), dtype=img.dtype, device=img.device)
+        for _ in range(cfg.iterations):
+            if bool(valid.min() > 0):
+                break
+            total = torch.nn.functional.conv2d(filled, kernel, padding=1, groups=c)
+            count = torch.nn.functional.conv2d(valid, kernel, padding=1, groups=c)
+            hole = (valid < 0.5) & (count > 0)
+            filled = torch.where(hole, total / count.clamp(min=1e-6), filled)
+            valid = torch.where(hole, torch.ones_like(valid), valid)
+
+        return filled.permute(0, 2, 3, 1)
