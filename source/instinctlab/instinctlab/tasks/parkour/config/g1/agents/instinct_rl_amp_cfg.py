@@ -6,6 +6,7 @@ from instinctlab.utils.wrappers.instinct_rl import (
     InstinctRlConv2dHeadCfg,
     InstinctRlMlpCfg,
     InstinctRlEncoderMoEActorCriticCfg,
+    InstinctRlEncoderMoEActorCriticRecurrentCfg,
     InstinctRlOnPolicyRunnerCfg,
     InstinctRlPpoAlgorithmCfg,
 )
@@ -45,25 +46,32 @@ class EncoderConfigs:
 
 
 @configclass
-class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
+class MoEPolicyCfg(InstinctRlEncoderMoEActorCriticRecurrentCfg):
     init_noise_std = 1.0
     num_moe_experts = 4
-    actor_hidden_dims = [256, 128, 64]
-    critic_hidden_dims = [256, 128, 64]
+    moe_gate_hidden_dims = [128]
+    actor_hidden_dims = [512, 256, 128]
+    critic_hidden_dims = [512, 256, 128]
     activation = "elu"
+    rnn_type = "gru"
+    rnn_hidden_size = 256
+    rnn_num_layers = 1
     encoder_configs = EncoderConfigs()
     critic_encoder_configs = EncoderConfigs()
 
 @configclass
-class MoEStudentPolicyCfg(InstinctRlEncoderMoEActorCriticCfg):
-    init_noise_std = 1.0
+class MoEStudentPolicyCfg(InstinctRlEncoderMoEActorCriticRecurrentCfg):
+    init_noise_std = 0.1
     num_moe_experts = 4
-    actor_hidden_dims = [256, 128, 64]
+    moe_gate_hidden_dims = [128]
+    actor_hidden_dims = [512, 256, 128]
     critic_hidden_dims = [256, 128, 64]
     activation = "elu"
+    rnn_type = "gru"
+    rnn_hidden_size = 256
+    rnn_num_layers = 1
     encoder_configs = EncoderDepthConfigs()
     critic_encoder_configs = EncoderConfigs()
-
 
 @configclass
 class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
@@ -111,6 +119,13 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
     # TPPO default "real" is the (non-squared) L2 norm; "mse_sum" = sum of squared diffs.
     distill_target = "mse_sum"
 
+    # TPPO aggregates each entry in its loss dictionary with the matching
+    # ``<loss_name>_coef`` attribute.
+    distillation_loss_coef = 1.0
+    encoder_distillation_loss_coef = 0.05
+    encoder_distillation_student_component = "depth_image_encoder"
+    encoder_distillation_teacher_component = "height_scan_encoder"
+
     num_learning_epochs = 5
     num_mini_batches = 4
     learning_rate = 1e-3
@@ -131,9 +146,12 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
 
     teacher_policy: dict = {
         "init_noise_std": 1.0,
-        "actor_hidden_dims": [256, 128, 64],
-        "critic_hidden_dims": [256, 128, 64],
+        "actor_hidden_dims": [512, 256, 128],
+        "critic_hidden_dims": [512, 256, 128],
         "activation": "elu",
+        "rnn_type": "gru",
+        "rnn_hidden_size": 256,
+        "rnn_num_layers": 1,
         "encoder_configs": {
             "height_scan_encoder": {
                 "class_name": "MlpModel",
@@ -156,32 +174,32 @@ class AmpAlgoStudentCfg(InstinctRlPpoAlgorithmCfg):
         },
         "obs_format": {
             "policy": {
-                "base_ang_vel": (24,),
-                "projected_gravity": (24,),
-                "velocity_commands": (24,),
-                "joint_pos_rel": (232,),
-                "joint_vel_rel": (232,),
-                "last_action": (232,),
-                "height_scan": (4 * 21 * 33,),
+                "base_ang_vel": (3,),
+                "projected_gravity": (3,),
+                "velocity_commands": (3,),
+                "joint_pos_rel": (29,),
+                "joint_vel_rel": (29,),
+                "last_action": (29,),
+                "height_scan": (21 * 33,),
             },
             "critic": {
-                "base_lin_vel": (24,),
-                "base_ang_vel": (24,),
-                "projected_gravity": (24,),
-                "velocity_commands": (24,),
-                "joint_pos_rel": (232,),
-                "joint_vel_rel": (232,),
-                "last_action": (232,),
-                "height_scan": (4 * 21 * 33,),
+                "base_lin_vel": (3,),
+                "base_ang_vel": (3,),
+                "projected_gravity": (3,),
+                "velocity_commands": (3,),
+                "joint_pos": (29,),
+                "joint_vel": (29,),
+                "actions": (29,),
+                "height_scan": (21 * 33,),
             },
         },
         "num_moe_experts": 4,
-        "moe_gate_hidden_dims": [],
+        "moe_gate_hidden_dims": [128],
         "num_actions": 29,
         "num_rewards": 1,
     }
     teacher_logdir = os.path.expanduser(
-        "~/Data/instinctlab_logs/instinct_rl/g1_perceptive_shadowing/20260111_103654_g1Perceptive_4MotionsKneelClimbStep1_concatMotionBins__GPU0_from20260108_032900"
+        "~/MyProject/InstinctLab/logs/20260822_112657_from20260713_091503"
     )
     value_loss_coef = 1.0
     use_clipped_value_loss = True

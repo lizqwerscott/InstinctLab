@@ -153,6 +153,14 @@ class InstinctRlEncoderMoEActorCriticCfg(
 
     class_name = "EncoderMoEActorCritic"
 
+@configclass
+class InstinctRlEncoderMoEActorCriticRecurrentCfg(
+    InstinctRlEncoderMoEActorCriticCfg,
+    InstinctRlActorCriticRecurrentCfg,
+):
+    """Configuration for the encoder MoE actor-critic-recurrent networks."""
+
+    class_name = "EncoderMoEActorCriticRecurrent"
 
 @configclass
 class InstinctRlEncoderVaeActorCriticCfg(
