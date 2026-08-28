@@ -427,7 +427,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
             ".*_knee_joint": ARMATURE_7520_22,
         },
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "feet": DelayedPDActuatorCfg(
         effort_limit_sim=50.0,
@@ -437,7 +437,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
         damping=2.0 * DAMPING_5020,
         armature=2.0 * ARMATURE_5020,
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "waist": DelayedPDActuatorCfg(
         effort_limit_sim=50,
@@ -447,7 +447,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
         damping=2.0 * DAMPING_5020,
         armature=2.0 * ARMATURE_5020,
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "waist_yaw": DelayedPDActuatorCfg(
         effort_limit_sim=88,
@@ -457,7 +457,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
         damping=DAMPING_7520_14,
         armature=ARMATURE_7520_14,
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
     "arms": DelayedPDActuatorCfg(
         joint_names_expr=[
@@ -515,7 +515,7 @@ beyondmimic_g1_29dof_delayed_actuators = {
             ".*_wrist_yaw_joint": ARMATURE_4010,
         },
         min_delay=0,
-        max_delay=2,
+        max_delay=4,
     ),
 }
 

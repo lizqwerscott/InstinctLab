@@ -108,6 +108,8 @@ class G1ParkourStudentRoughEnvCfg(ParkourStudentEnvCfg):
 class ShoeConfigMixin:
     def apply_shoe_config(self):
         self.scene.robot = G1_with_shoe_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        # Reapply the actuator model after replacing the base robot with the shoe URDF.
+        self.scene.robot.actuators = beyondmimic_g1_29dof_delayed_actuators
         self.scene.leg_volume_points.points_generator.z_min = -0.063
         self.scene.leg_volume_points.points_generator.z_max = -0.023
         self.rewards.rewards.feet_at_plane.params["height_offset"] = 0.058
