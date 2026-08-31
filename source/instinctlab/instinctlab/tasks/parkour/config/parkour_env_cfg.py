@@ -178,18 +178,6 @@ class SceneCfg(InteractiveSceneCfg):
         ),
         debug_vis=False,
     )
-    heightmap = RayCasterCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-        ray_alignment="yaw",
-        mesh_prim_paths=["/World/ground"],
-        pattern_cfg=patterns.GridPatternCfg(
-            resolution=0.05,
-            size=(1.80, 1.20),
-            direction=(0.0, 0.0, -1.0),
-        ),
-        debug_vis=False,
-    )
     height_scanner_critic = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/torso_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
@@ -247,7 +235,7 @@ class ObservationsCfg:
             func=mdp.command_slice,
             history_length=1,
             flatten_history_dim=True,
-            params={"command_name": "base_velocity", "start": 3, "end": 12},
+            params={"command_name": "base_velocity", "start": 3, "end": 10},
             noise=None,
         )
         joint_pos_rel = ObsTerm(
@@ -264,6 +252,18 @@ class ObservationsCfg:
             flatten_history_dim=True,
         )
         last_action = ObsTerm(func=mdp.last_action, history_length=1, flatten_history_dim=True)
+        # HugWBC gait clock functions sin(2*pi*phi_bar) for both feet (2D).
+        # 相位参数必须与 HugWBCContactSwingReward / HugWBCFeetClearanceReward 一致
+        # (它们共享同一个相位时钟)。
+        clock_inputs = ObsTerm(
+            func=mdp.GaitPhaseClockTerm,
+            params={
+                "phase_sigma": 0.05,  # sigma of Eq. 5 (HugWBC kappa_gait_probs)
+            },
+            noise=None,
+            history_length=1,
+            flatten_history_dim=True,
+        )
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -293,7 +293,7 @@ class ObservationsCfg:
             func=mdp.command_slice,
             history_length=1,
             flatten_history_dim=True,
-            params={"command_name": "base_velocity", "start": 3, "end": 12},
+            params={"command_name": "base_velocity", "start": 3, "end": 10},
             noise=None,
         )
         terrain_height = ObsTerm(
@@ -340,11 +340,11 @@ class CommandsCfg:
         debug_vis=False,
         velocity_control_stiffness=2.0,
         heading_control_stiffness=2.0,
-        rel_standing_envs=0.05,
+        rel_standing_envs=0.1,  # HugWBC: 10% standing task mode at each command resample
         ranges=mdp.PoseVelocityCommandCfg.Ranges(lin_vel_x=(0.0, 0.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(-1.0, 1.0)),
         behavior_ranges=mdp.PoseVelocityCommandCfg.BehaviorRanges(
-            frequency=(1.0, 1.0),
-            foot_swing_height=(0.08, 0.08),
+            frequency=(1.5, 3.5),  # HugWBC gait frequency command range (Hz)
+            foot_swing_height=(0.08, 0.15),  # HugWBC swing height command range (m)
             body_height=(-0.3, 0.0),
             body_pitch=(0.0, 0.0),
             waist_yaw=(0.0, 0.0),
@@ -478,59 +478,49 @@ class G1Rewards:
         },
     )
 
-    # 单个合并奖励: 外部 weight=总权重, 内部 proximity/bezier 权重区分分量。
-    # 相位驱动 (HugWBC-style): 固定步态周期提供期望轨迹, 真实接触确认 touchdown
-    # 并门控 DCM 规划 (对侧支撑脚必须接触)。
-    foothold = RewTerm(
-        func=mdp.FootholdReward,
-        weight=10.0,  # 总奖励权重 (课程 foothold_weight 会 ramp 这个值)
+    # ---- HugWBC 周期性接触-摆动奖励 (论文 Eq. 8) ----
+    # 摆动期惩罚足底接触力 (force 项), 支撑期惩罚足部水平滑动 (vel 项),
+    # 由期望接触概率 C(phi) 加权 (HugWBC 开源实现 tracking_contacts_shaped_force/vel)。
+    # 相位由命令驱动 (PoseVelocityCommand.behavior_command) 共享同一时钟;
+    # phase_sigma 必须与 clock_inputs 观测项一致。
+    tracking_contacts_shaped_force = RewTerm(
+        func=mdp.HugWBCContactSwingReward,
+        weight=2.0,
         params={
-            # 内部状态权重
-            "proximity_weight": 1.0,
-            "bezier_weight": 1.0,
-            # DCM 规划器落点搜索范围 (沿 x 轴, 前后对称可配)
-            #   前方 max_fwd_range 合理区间: [0.4, 0.75]
-            #     0.4 = 仅够 0.8 m/s 步态, 无裕量; 0.6 = 覆盖 1.0 m/s 大步 + 上坡/楼梯裕量
-            #     (bezier 分支验证值); 网格上限 ±0.9m (37 列 × 0.05m), 超过 0.75 收益递减,
-            #     且有效单元线性增加 → 每帧 costmap 算力上升。
-            #   后方 max_bwd_range: 0 = 禁用向后落点; 后退/原地步态设 0.1~0.2。
-            "max_fwd_range": 0.6,
-            "max_bwd_range": 0.0,
-            "sigma_p": 10.0,
-            "sigma_bezier": 50.0,
-            # Bézier / 相位参数 (T_swing 是相位、Bézier、DCM、dense scale 的唯一时间真值)
-            "sigma_d": 0.0,
-            "T_swing": 0.45,
-            "duty_factor": 0.5,
-            "phase_transition_sigma": 0.04,
-            "phase_speed_threshold": 0.05,
-            "warmup_time_range": (0.05, 0.15),
-            "swing_contact_weight": 0.2,
-            "kappa": 0.4,
-            "b_min": 0.25,
-            "b_max": 0.75,
-            "c_min": 0.02,
-            "c_scale": 0.2,
-            "c_max": 0.1,
-            "delta_l_minus": 0.30,
-            "delta_l_plus": 0.05,
-            "delta_r_minus": 0.05,
-            "delta_r_plus": 0.25,
-            "heightmap_sensor_cfg": SceneEntityCfg("heightmap"),
+            "component": "force",
+            "force_sigma": 50.0,
+            "vel_sigma": 5.0,
+            "vel_use_xy": True,
+            "phase_sigma": 0.05,
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "foot_center_offset": (0.035, 0.0, -0.058),
-            # 接触边沿去抖 (替代 EMA): 连续离地/接触 ≥ edge_hold_time 才触发事件,
-            #   且 < edge_window 保证单次触发 (延迟 2-3 控制步, 免疫 <25ms 毛刺)
-            "edge_hold_time": 0.025,
-            "edge_window": 0.05,
-            "debug_vis": False,
-            "terrain_names": [
-                "pyramid_stairs",
-                "pyramid_stairs_inv",
-                "up_down",
-                "down_up",
-            ],
+        },
+    )
+    tracking_contacts_shaped_vel = RewTerm(
+        func=mdp.HugWBCContactSwingReward,
+        weight=4.0,
+        params={
+            "component": "vel",
+            "force_sigma": 50.0,
+            "vel_sigma": 5.0,
+            "vel_use_xy": True,
+            "phase_sigma": 0.05,
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+        },
+    )
+    # HugWBC 摆动高度轨迹奖励 (论文 Eq. 9/10): 五阶多项式目标摆高, (1 - C(phi)) 门控。
+    # 目标摆高来自行为命令 foot_swing_height (HugWBC 读 commands[:, 6])。
+    feet_clearance = RewTerm(
+        func=mdp.HugWBCFeetClearanceReward,
+        weight=-30.0,
+        params={
+            "base_height": 0.07,
+            "clip_max": 0.1,
+            "phase_sigma": 0.05,
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
+            "right_height_scanner_cfg": SceneEntityCfg("right_height_scanner"),
         },
     )
 
@@ -703,29 +693,6 @@ class CurriculumCfg:
     terrain_levels = CurrTerm(
         func=mdp.tracking_exp_vel,
         params={"lin_vel_threshold": (0.3, 0.6), "ang_vel_threshold": (0.0, 0.0)},
-    )
-    foothold_weight = CurrTerm(
-        func=mdp.foothold_weight_schedule,
-        params={
-            "reward_term_name": "foothold",
-            "start_weight": 0.0,
-            "end_weight": 40.0,
-            "vel_tracking_threshold": 0.75,
-            "vel_tracking_target": 0.85,
-            # 闩锁阈值:EMA 追踪分 >= 该值后权重与速度解耦(一次性闩锁),
-            # 由爬升速度(ramp_rate/ramp_steps)自行单调爬升到 end_weight,不再随追踪值回落。
-            # 默认 None = vel_tracking_target。想让追踪到 X 之后"自己慢慢变大",
-            # 把这里设成 X,并让 vel_tracking_target 高于 X——否则门控在 X 处
-            # 已饱和(权重 == end_weight),闩锁后没有爬升空间只会保持定值。
-            "latch_threshold": 0.75,
-            # 爬升速度二选一:
-            #   ramp_rate  = 每个 env step 叠加的权重增量
-            #   ramp_steps = 闩锁后多少 env step 爬满(end_weight)(更直观, 优先级更高)
-            # 本环境: 1 env step = 0.02s(50步/秒), 1 episode = 1000 步,
-            # 1 轮(PPO iteration) = 24 env step (num_steps_per_env)。
-            # 想 2000 轮爬满 -> 2000*24 = 48000 步 -> "ramp_steps": 48000。
-            "ramp_steps": 48000,
-        },
     )
 
 

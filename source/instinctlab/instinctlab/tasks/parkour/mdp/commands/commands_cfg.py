@@ -42,7 +42,7 @@ class PoseVelocityCommandCfg(CommandTermCfg):
 
     @configclass
     class BehaviorRanges:
-        """Uniform distribution ranges for the nine-dimensional behavior command."""
+        """Uniform distribution ranges for the seven-dimensional behavior command."""
 
         frequency: tuple[float, float] = MISSING
         """Range for the gait frequency (in Hz)."""

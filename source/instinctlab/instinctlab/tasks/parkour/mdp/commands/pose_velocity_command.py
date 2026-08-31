@@ -24,7 +24,7 @@ class PoseVelocityCommand(CommandTerm):
     """Velocity command based on the 2D flat patch command generator."""
 
     TASK_COMMAND_DIM = 3
-    BEHAVIOR_COMMAND_DIM = 9
+    BEHAVIOR_COMMAND_DIM = 7
     COMMAND_DIM = TASK_COMMAND_DIM + BEHAVIOR_COMMAND_DIM
 
     cfg: PoseVelocityCommandCfg
@@ -52,7 +52,6 @@ class PoseVelocityCommand(CommandTerm):
         self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
         self.behavior_command = torch.zeros(self.num_envs, self.BEHAVIOR_COMMAND_DIM, device=self.device)
         self._command = torch.zeros(self.num_envs, self.COMMAND_DIM, device=self.device)
-        self._phase = torch.zeros(self.num_envs, 2, device=self.device)
         self.heading_target = torch.zeros(self.num_envs, device=self.device)
         self.max_command_b = torch.zeros(self.num_envs, 3, device=self.device)
         self.is_standing_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -142,7 +141,7 @@ class PoseVelocityCommand(CommandTerm):
 
     @property
     def command(self) -> torch.Tensor:
-        """The task velocity and behavior command. Shape is (num_envs, 12)."""
+        """The task velocity and behavior command. Shape is (num_envs, 10)."""
         self._command[:, : self.TASK_COMMAND_DIM] = self.vel_command_b
         self._command[:, self.TASK_COMMAND_DIM :] = self.behavior_command
         return self._command
@@ -243,7 +242,7 @@ class PoseVelocityCommand(CommandTerm):
             behavior_ranges.phase_offset,
             behavior_ranges.stance_fraction,
         )
-        for behavior_index, behavior_range in zip((0, 1, 2, 3, 4, 5, 8), behavior_values):
+        for behavior_index, behavior_range in zip((0, 1, 2, 3, 4, 5, 6), behavior_values):
             low, high = behavior_range
             self.behavior_command[env_ids, behavior_index] = low + (high - low) * torch.rand(
                 len(env_ids), device=self.device
@@ -319,19 +318,12 @@ class PoseVelocityCommand(CommandTerm):
         self.vel_command_b[random_velocity_env_ids, 1] = self.random_lin_vel_y[random_velocity_env_ids]
         self.vel_command_b[random_velocity_env_ids, 2] = self.random_ang_vel_z[random_velocity_env_ids]
 
-        self._phase[:, 0] = torch.remainder(
-            self._phase[:, 0] + self.behavior_command[:, 0] * self._env.step_dt,
-            1.0,
-        )
-        self._phase[:, 1] = torch.remainder(self._phase[:, 0] + self.behavior_command[:, 5], 1.0)
-        self.behavior_command[:, 6] = torch.sin(2.0 * torch.pi * self._phase[:, 0])
-        self.behavior_command[:, 7] = torch.sin(2.0 * torch.pi * self._phase[:, 1])
+        # NOTE: behavior_command[:, 6:7] (raw gait-phase clock sin(2*pi*phi)) were
+        # removed — the policy observes the homogenized phase clock sin(2*pi*phi_bar)
+        # via the GaitPhaseClockTerm observation term instead (see mdp/rewards.py).
 
     def reset(self, env_ids: Sequence[int] | None = None):
         extras = super().reset(env_ids)
-        indices = slice(None) if env_ids is None else env_ids
-        sample_count = self.num_envs if env_ids is None else len(env_ids)
-        self._phase[indices] = torch.rand(sample_count, 2, device=self.device)
         self._update_command()
         return extras
 
