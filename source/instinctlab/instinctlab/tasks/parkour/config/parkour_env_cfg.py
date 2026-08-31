@@ -190,6 +190,19 @@ class SceneCfg(InteractiveSceneCfg):
         ),
         debug_vis=False,
     )
+    height_scanner_critic = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(
+            resolution=0.1,
+            size=(1.6, 1.2),
+            direction=(0.0, 0.0, -1.0),
+        ),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+        update_period=0.02,
+    )
 
     # lights
     sky_light = AssetBaseCfg(
@@ -224,10 +237,17 @@ class ObservationsCfg:
             flatten_history_dim=True,
         )
         velocity_commands = ObsTerm(
-            func=mdp.generated_commands,
+            func=mdp.command_slice,
             history_length=1,
             flatten_history_dim=True,
-            params={"command_name": "base_velocity"},
+            params={"command_name": "base_velocity", "start": 0, "end": 3},
+            noise=None,
+        )
+        behavior_commands = ObsTerm(
+            func=mdp.command_slice,
+            history_length=1,
+            flatten_history_dim=True,
+            params={"command_name": "base_velocity", "start": 3, "end": 12},
             noise=None,
         )
         joint_pos_rel = ObsTerm(
@@ -263,11 +283,22 @@ class ObservationsCfg:
         )
         projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=1, flatten_history_dim=True)
         velocity_commands = ObsTerm(
-            func=mdp.generated_commands,
+            func=mdp.command_slice,
             history_length=1,
             flatten_history_dim=True,
-            params={"command_name": "base_velocity"},
+            params={"command_name": "base_velocity", "start": 0, "end": 3},
             noise=None,
+        )
+        behavior_commands = ObsTerm(
+            func=mdp.command_slice,
+            history_length=1,
+            flatten_history_dim=True,
+            params={"command_name": "base_velocity", "start": 3, "end": 12},
+            noise=None,
+        )
+        terrain_height = ObsTerm(
+            func=mdp.height_scan,
+            params={"sensor_cfg": SceneEntityCfg("height_scanner_critic")},
         )
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=1, flatten_history_dim=True)
         joint_vel = ObsTerm(
@@ -311,6 +342,15 @@ class CommandsCfg:
         heading_control_stiffness=2.0,
         rel_standing_envs=0.05,
         ranges=mdp.PoseVelocityCommandCfg.Ranges(lin_vel_x=(0.0, 0.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(-1.0, 1.0)),
+        behavior_ranges=mdp.PoseVelocityCommandCfg.BehaviorRanges(
+            frequency=(1.0, 1.0),
+            foot_swing_height=(0.08, 0.08),
+            body_height=(-0.3, 0.0),
+            body_pitch=(0.0, 0.0),
+            waist_yaw=(0.0, 0.0),
+            phase_offset=(0.5, 0.5),
+            stance_fraction=(0.5, 0.5),
+        ),
         random_velocity_terrain=["perlin_rough_stand"],
         velocity_ranges={
             "perlin_rough": {

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import numpy as np
-import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import isaaclab.utils.math as math_utils
+import numpy as np
+import torch
 from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm
 from isaaclab.markers import VisualizationMarkers
@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 
 class PoseVelocityCommand(CommandTerm):
     """Velocity command based on the 2D flat patch command generator."""
+
+    TASK_COMMAND_DIM = 3
+    BEHAVIOR_COMMAND_DIM = 9
+    COMMAND_DIM = TASK_COMMAND_DIM + BEHAVIOR_COMMAND_DIM
 
     cfg: PoseVelocityCommandCfg
     """Configuration for the command generator."""
@@ -46,6 +50,9 @@ class PoseVelocityCommand(CommandTerm):
         self.pos_command_b = torch.zeros_like(self.pos_command_w)
         self.heading_command_b = torch.zeros_like(self.heading_command_w)
         self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self.behavior_command = torch.zeros(self.num_envs, self.BEHAVIOR_COMMAND_DIM, device=self.device)
+        self._command = torch.zeros(self.num_envs, self.COMMAND_DIM, device=self.device)
+        self._phase = torch.zeros(self.num_envs, 2, device=self.device)
         self.heading_target = torch.zeros(self.num_envs, device=self.device)
         self.max_command_b = torch.zeros(self.num_envs, 3, device=self.device)
         self.is_standing_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -135,8 +142,10 @@ class PoseVelocityCommand(CommandTerm):
 
     @property
     def command(self) -> torch.Tensor:
-        """The desired base velocity command in the base frame. Shape is (num_envs, 3)."""
-        return self.vel_command_b
+        """The task velocity and behavior command. Shape is (num_envs, 12)."""
+        self._command[:, : self.TASK_COMMAND_DIM] = self.vel_command_b
+        self._command[:, self.TASK_COMMAND_DIM :] = self.behavior_command
+        return self._command
 
     @property
     def pose_command(self) -> torch.Tensor:
@@ -224,6 +233,22 @@ class PoseVelocityCommand(CommandTerm):
             )
             self.random_ang_vel_z *= torch.abs(self.random_ang_vel_z) > 0.5
 
+        behavior_ranges = self.cfg.behavior_ranges
+        behavior_values = (
+            behavior_ranges.frequency,
+            behavior_ranges.foot_swing_height,
+            behavior_ranges.body_height,
+            behavior_ranges.body_pitch,
+            behavior_ranges.waist_yaw,
+            behavior_ranges.phase_offset,
+            behavior_ranges.stance_fraction,
+        )
+        for behavior_index, behavior_range in zip((0, 1, 2, 3, 4, 5, 8), behavior_values):
+            low, high = behavior_range
+            self.behavior_command[env_ids, behavior_index] = low + (high - low) * torch.rand(
+                len(env_ids), device=self.device
+            )
+
     def _update_command(self):
         """Re-target the position command to the current root state."""
         target_vec = self.pos_command_w - self.robot.data.root_pos_w[:, :3]
@@ -293,6 +318,22 @@ class PoseVelocityCommand(CommandTerm):
         self.vel_command_b[random_velocity_env_ids, 0] = self.random_lin_vel_x[random_velocity_env_ids]
         self.vel_command_b[random_velocity_env_ids, 1] = self.random_lin_vel_y[random_velocity_env_ids]
         self.vel_command_b[random_velocity_env_ids, 2] = self.random_ang_vel_z[random_velocity_env_ids]
+
+        self._phase[:, 0] = torch.remainder(
+            self._phase[:, 0] + self.behavior_command[:, 0] * self._env.step_dt,
+            1.0,
+        )
+        self._phase[:, 1] = torch.remainder(self._phase[:, 0] + self.behavior_command[:, 5], 1.0)
+        self.behavior_command[:, 6] = torch.sin(2.0 * torch.pi * self._phase[:, 0])
+        self.behavior_command[:, 7] = torch.sin(2.0 * torch.pi * self._phase[:, 1])
+
+    def reset(self, env_ids: Sequence[int] | None = None):
+        extras = super().reset(env_ids)
+        indices = slice(None) if env_ids is None else env_ids
+        sample_count = self.num_envs if env_ids is None else len(env_ids)
+        self._phase[indices] = torch.rand(sample_count, 2, device=self.device)
+        self._update_command()
+        return extras
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome

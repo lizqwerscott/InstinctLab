@@ -40,8 +40,36 @@ class PoseVelocityCommandCfg(CommandTermCfg):
         ang_vel_z: tuple[float, float] = MISSING
         """Range for the angular-z velocity command (in rad/s)."""
 
+    @configclass
+    class BehaviorRanges:
+        """Uniform distribution ranges for the nine-dimensional behavior command."""
+
+        frequency: tuple[float, float] = MISSING
+        """Range for the gait frequency (in Hz)."""
+
+        foot_swing_height: tuple[float, float] = MISSING
+        """Range for the maximum foot swing height (in m)."""
+
+        body_height: tuple[float, float] = MISSING
+        """Range for the body height offset (in m)."""
+
+        body_pitch: tuple[float, float] = MISSING
+        """Range for the body pitch command (in rad)."""
+
+        waist_yaw: tuple[float, float] = MISSING
+        """Range for the waist yaw command (in rad)."""
+
+        phase_offset: tuple[float, float] = MISSING
+        """Range for the phase offset between the two legs (in cycles)."""
+
+        stance_fraction: tuple[float, float] = MISSING
+        """Range for the fraction of a gait cycle spent in stance."""
+
     ranges: Ranges = MISSING
     """Distribution ranges for the velocity commands. Only used in random_velocity_terrains."""
+
+    behavior_ranges: BehaviorRanges = MISSING
+    """Distribution ranges for the behavior command."""
 
     random_velocity_terrain: list[str] = None
     """List of terrain types for which the velocity commands should be randomized."""
