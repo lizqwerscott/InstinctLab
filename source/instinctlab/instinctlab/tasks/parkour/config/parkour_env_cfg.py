@@ -1,8 +1,7 @@
 import math
 import os
-from dataclasses import MISSING
-
 import torch
+from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
@@ -40,9 +39,9 @@ from instinctlab.utils.noise import (
     DepthNormalizationCfg,
     DepthSteroNoiseCfg,
     GaussianBlurNoiseCfg,
+    ParametricDepthNoiseCfg,
     RandomGaussianNoiseCfg,
     RangeBasedGaussianNoiseCfg,
-    ParametricDepthNoiseCfg,
 )
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
@@ -395,6 +394,7 @@ class ObservationsCfg:
     # critic group
     critic: CriticCfg = CriticCfg()
 
+
 @configclass
 class ActionsCfg:
     """Action specifications for the MDP."""
@@ -423,8 +423,8 @@ class CommandsCfg:
             frequency=(1.5, 3.5),  # HugWBC gait frequency command range (Hz)
             foot_swing_height=(0.08, 0.15),  # HugWBC swing height command range (m)
             body_height=(-0.3, 0.0),
-            body_pitch=(0.0, 0.0),
-            waist_yaw=(0.0, 0.0),
+            body_pitch=(0.0, 0.4),
+            waist_yaw=(-1.0, 1.0),
             phase_offset=(0.5, 0.5),
             stance_fraction=(0.5, 0.5),
         ),
@@ -452,37 +452,62 @@ class CommandsCfg:
 class G1Rewards:
     """Reward terms for the MDP."""
 
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
+
     # Task rewards
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
         weight=2.0,
-        params={"command_name": "base_velocity", "std": 0.5},
+        params={"command_name": "base_velocity", "std": math.sqrt(0.2)},
     )
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_exp,
         weight=2.0,
-        params={"command_name": "base_velocity", "std": 0.5},
+        params={"command_name": "base_velocity", "std": math.sqrt(0.2)},
     )
-    heading_error = RewTerm(func=mdp.heading_error, weight=-1.0, params={"command_name": "base_velocity"})
-    dont_wait = RewTerm(func=mdp.dont_wait, weight=-0.5, params={"command_name": "base_velocity"})
-    is_alive = RewTerm(func=mdp.is_alive, weight=3.0)
+    heading_error = RewTerm(func=mdp.heading_error, weight=0.0, params={"command_name": "base_velocity"})
+    dont_wait = RewTerm(func=mdp.dont_wait, weight=0.0, params={"command_name": "base_velocity"})
+    is_alive = RewTerm(func=mdp.is_alive, weight=0.0)
     stand_still = RewTerm(
         func=mdp.stand_still,
-        weight=-0.3,
+        weight=0.0,
         params={"command_name": "base_velocity", "offset": 4.0},
+    )
+
+    body_height_tracking = RewTerm(
+        func=mdp.hugwbc_base_height_tracking,
+        weight=-40.0,
+        params={
+            "command_name": "base_velocity",
+            "sensor_cfg": SceneEntityCfg("height_scanner_critic"),
+            "target_height": 0.9,
+        },
+    )
+    body_pitch_tracking = RewTerm(
+        func=mdp.hugwbc_body_pitch_tracking,
+        weight=-10.0,
+        params={"command_name": "base_velocity"},
+    )
+    waist_yaw_tracking = RewTerm(
+        func=mdp.hugwbc_waist_yaw_tracking,
+        weight=-2.0,
+        params={
+            "command_name": "base_velocity",
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["waist_yaw_joint"]),
+        },
     )
 
     # Regularization rewards
     volume_points_penetration = RewTerm(
         func=mdp.volume_points_penetration,
-        weight=-4.0,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("leg_volume_points"),
         },
     )
     feet_air_time = RewTerm(
         func=mdp.feet_air_time,
-        weight=0.5,
+        weight=0.0,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
@@ -491,7 +516,7 @@ class G1Rewards:
     )
     feet_slide = RewTerm(
         func=mdp.contact_slide,
-        weight=-0.4,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
@@ -500,35 +525,46 @@ class G1Rewards:
     )
     joint_deviation_hip = RewTerm(
         func=mdp.joint_deviation_square,
-        weight=-0.5,
+        weight=0.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_yaw_joint", ".*_hip_roll_joint"])},
     )
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
+    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.1)
+    feet_slip = RewTerm(
+        func=mdp.hugwbc_feet_slip,
+        weight=-0.2,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            "threshold": 0.1,
+        },
+    )
     dof_torques_l2 = RewTerm(
-        func=mdp.joint_torques_l2,
-        weight=-1.5e-7,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"])},
+        func=instinct_mdp.joint_torques_l2,
+        weight=-5.0e-6,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
     dof_acc_l2 = RewTerm(
         func=mdp.joint_acc_l2,
-        weight=-1.25e-7,
+        weight=-2.5e-7,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
     dof_vel_l2 = RewTerm(
         func=mdp.joint_vel_l2,
-        weight=-1e-4,
+        weight=0.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    action_smoothness = RewTerm(func=mdp.HugWBCActionSmoothness, weight=-0.01)
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=0.0)
     pelvis_orientation_l2 = RewTerm(
         func=mdp.link_orientation,
-        weight=-3.0,
+        weight=0.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names="pelvis")},
     )
     feet_flat_ori = RewTerm(
         func=mdp.feet_orientation_contact,
-        weight=-0.4,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
@@ -536,7 +572,7 @@ class G1Rewards:
     )
     feet_at_plane = RewTerm(
         func=mdp.feet_at_plane,
-        weight=-0.1,
+        weight=0.0,
         params={
             "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
@@ -547,7 +583,7 @@ class G1Rewards:
     )
     feet_close_xy = RewTerm(
         func=mdp.feet_close_xy_gauss,
-        weight=0.4,
+        weight=0.0,
         params={
             "threshold": 0.12,
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
@@ -601,9 +637,35 @@ class G1Rewards:
         },
     )
 
+    upper_joint_deviation = RewTerm(
+        func=instinct_mdp.joint_deviation_square,
+        weight=-0.5,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    ".*_shoulder_.*",
+                    ".*_elbow_joint",
+                    ".*_wrist.*",
+                    "waist_.*",
+                ],
+            )
+        },
+    )
+    hip_joint_deviation = RewTerm(
+        func=instinct_mdp.joint_deviation_square,
+        weight=-2.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_yaw_joint", ".*_hip_roll_joint"])},
+    )
+    feet_symmetry = RewTerm(
+        func=mdp.hugwbc_feet_symmetry,
+        weight=-5.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link")},
+    )
+
     energy = RewTerm(
         func=mdp.motors_power_square,
-        weight=-5e-5,
+        weight=0.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"]),
             "normalize_by_stiffness": True,
@@ -611,7 +673,7 @@ class G1Rewards:
     )
     freeze_upper_body = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-0.004,
+        weight=0.0,
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot",
@@ -623,12 +685,12 @@ class G1Rewards:
     # Safety rewards
     dof_pos_limits = RewTerm(
         func=mdp.joint_pos_limits,
-        weight=-1.0,
+        weight=0.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
     )
     dof_vel_limits = RewTerm(
         func=mdp.joint_vel_limits,
-        weight=-1.0,
+        weight=0.0,
         params={
             "soft_ratio": 0.9,
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
@@ -636,7 +698,7 @@ class G1Rewards:
     )
     torque_limits = RewTerm(
         func=mdp.applied_torque_limits_by_ratio,
-        weight=-0.01,
+        weight=0.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
             "limit_ratio": 0.8,
@@ -644,7 +706,7 @@ class G1Rewards:
     )
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-1.0,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="(?!.*_ankle_roll_link).*"),
             "threshold": 1.0,
@@ -672,6 +734,7 @@ class TerminationsCfg:
     )
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 1.0})
     root_height = DoneTerm(func=mdp.root_height_below_env_origin_minimum, params={"minimum_height": 0.5})
+
 
 @configclass
 class EventCfg:

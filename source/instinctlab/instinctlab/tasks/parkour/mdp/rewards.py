@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import math
+import torch
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-import torch
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply_inverse, quat_from_angle_axis
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -196,8 +197,6 @@ def link_orientation(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEn
     return torch.sum(torch.square(link_projected_gravity[:, :2]), dim=1)
 
 
-
-
 # ===========================================================================
 # HugWBC gait phase clock and contact-swing rewards
 #
@@ -338,6 +337,117 @@ class GaitPhaseTracker:
         return self._swing_height
 
 
+def hugwbc_base_height_tracking(
+    env: "ManagerBasedRLEnv",
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    target_height: float,
+) -> torch.Tensor:
+    """Return squared local-terrain base-height tracking error."""
+    robot = env.scene["robot"]
+    scanner = env.scene[sensor_cfg.name]
+    ray_heights = scanner.data.ray_hits_w[..., 2]
+    ray_heights = torch.where(torch.isfinite(ray_heights), ray_heights, torch.zeros_like(ray_heights))
+    terrain_height = ray_heights.mean(dim=-1)
+    command = env.command_manager.get_command(command_name)
+    desired_height = target_height + command[:, 5]
+    error = robot.data.root_pos_w[:, 2] - terrain_height - desired_height
+    reward = torch.square(error)
+    standing = env.command_manager.get_term(command_name).is_standing_env
+    return torch.where(standing, 3.0 * reward, reward)
+
+
+def hugwbc_body_pitch_tracking(env: "ManagerBasedRLEnv", command_name: str) -> torch.Tensor:
+    """Return squared body-pitch tracking error."""
+    robot = env.scene["robot"]
+    command = env.command_manager.get_command(command_name)
+    pitch_axis = torch.zeros_like(robot.data.root_pos_w)
+    pitch_axis[:, 1] = 1.0
+    pitch_quat = quat_from_angle_axis(command[:, 6], pitch_axis)
+    desired_projected_gravity = quat_apply_inverse(pitch_quat, robot.data.GRAVITY_VEC_W)
+    projected_gravity = quat_apply_inverse(robot.data.root_quat_w, robot.data.GRAVITY_VEC_W)
+    return torch.sum(
+        torch.square(projected_gravity[:, :2] - desired_projected_gravity[:, :2]),
+        dim=-1,
+    )
+
+
+def hugwbc_waist_yaw_tracking(
+    env: "ManagerBasedRLEnv",
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Return squared waist-yaw tracking error relative to the nominal pose."""
+    robot = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    joint_error = robot.data.joint_pos[:, asset_cfg.joint_ids] - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    joint_error = joint_error - command[:, 7:8]
+    return torch.sum(torch.square(joint_error), dim=-1)
+
+
+def hugwbc_feet_slip(
+    env: "ManagerBasedRLEnv",
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    threshold: float = 0.1,
+) -> torch.Tensor:
+    """Return the HugWBC bounded stance foot-slip penalty."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact = (
+        torch.max(
+            torch.linalg.norm(
+                contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids],
+                dim=-1,
+            ),
+            dim=1,
+        )[0]
+        > threshold
+    )
+    robot = env.scene[asset_cfg.name]
+    foot_velocity = robot.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    slip_speed = torch.linalg.norm(foot_velocity, dim=-1) * contact
+    return 1.0 - torch.exp(-torch.sum(slip_speed, dim=-1))
+
+
+def hugwbc_feet_symmetry(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg,
+    phase_tolerance: float = 1.0e-5,
+) -> torch.Tensor:
+    """Return the phase-gated squared x-z foot symmetry error."""
+    tracker = get_gait_tracker(env)
+    tracker.update(env)
+    phase = tracker.homogenized_phase()
+    same_phase = torch.isclose(phase[:, 0], phase[:, 1], atol=phase_tolerance, rtol=0.0)
+    robot = env.scene[asset_cfg.name]
+    relative_positions = robot.data.body_pos_w[:, asset_cfg.body_ids] - robot.data.root_pos_w.unsqueeze(1)
+    positions_b = quat_apply_inverse(robot.data.root_quat_w.unsqueeze(1), relative_positions)
+    difference = positions_b[:, 0][:, (0, 2)] - positions_b[:, 1][:, (0, 2)]
+    return torch.sum(torch.square(difference), dim=-1) * same_phase
+
+
+class HugWBCActionSmoothness(ManagerTermBase):
+    """Return the squared second difference of policy actions."""
+
+    def __init__(self, cfg, env: "ManagerBasedRLEnv"):
+        super().__init__(cfg, env)
+        previous_action = env.action_manager.prev_action.clone()
+        self._previous_action = previous_action
+        self._previous_previous_action = previous_action.clone()
+
+    def __call__(self, env: "ManagerBasedRLEnv") -> torch.Tensor:
+        action = env.action_manager.action
+        action_difference = action - 2.0 * self._previous_action + self._previous_previous_action
+        self._previous_previous_action[:] = self._previous_action
+        self._previous_action[:] = action
+        return torch.sum(torch.square(action_difference), dim=-1)
+
+    def reset(self, env_ids: Sequence[int] | slice):
+        previous_action = self._env.action_manager.prev_action[env_ids]
+        self._previous_action[env_ids] = previous_action
+        self._previous_previous_action[env_ids] = previous_action
+
+
 def get_gait_tracker(env: "ManagerBasedRLEnv", phase_sigma: float = 0.05) -> GaitPhaseTracker:
     """Return the env's shared gait tracker, creating it on first use.
 
@@ -469,14 +579,7 @@ class HugWBCFeetClearanceReward(ManagerTermBase):
         phases = torch.clamp(0.75 - torch.abs(phi_bar - 0.75), 0.0, 1.0)  # (N, 2)
         coef = _polynomial_planer(0.5, 0.75, 0, 1)
         p = phases - 0.5
-        curve = (
-            coef[0]
-            + coef[1] * p
-            + coef[2] * p**2
-            + coef[3] * p**3
-            + coef[4] * p**4
-            + coef[5] * p**5
-        )
+        curve = coef[0] + coef[1] * p + coef[2] * p**2 + coef[3] * p**3 + coef[4] * p**4 + coef[5] * p**5
         curve = torch.where(phases < 0.5, torch.zeros_like(curve), curve)
         target_height = self._tracker.swing_height.unsqueeze(-1) * curve + self._base_height  # (N, 2)
 
@@ -490,12 +593,12 @@ class HugWBCFeetClearanceReward(ManagerTermBase):
         asset = env.scene[self._asset_cfg.name]
         left = env.scene[self._left_scanner_cfg.name]
         right = env.scene[self._right_scanner_cfg.name]
-        left_gz = torch.where(torch.isinf(left.data.ray_hits_w[..., 2]), 0.0, left.data.ray_hits_w[..., 2]).mean(
-            dim=-1
-        )
-        right_gz = torch.where(torch.isinf(right.data.ray_hits_w[..., 2]), 0.0, right.data.ray_hits_w[..., 2]).mean(
-            dim=-1
-        )
+        left_gz = torch.where(torch.isinf(left.data.ray_hits_w[..., 2]), 0.0, left.data.ray_hits_w[..., 2]).mean(dim=-1)
+        right_gz = torch.where(
+            torch.isinf(right.data.ray_hits_w[..., 2]),
+            0.0,
+            right.data.ray_hits_w[..., 2],
+        ).mean(dim=-1)
         left_z = asset.data.body_pos_w[:, self._asset_cfg.body_ids[0], 2]
         right_z = asset.data.body_pos_w[:, self._asset_cfg.body_ids[1], 2]
         return torch.stack([left_z - left_gz, right_z - right_gz], dim=-1)
