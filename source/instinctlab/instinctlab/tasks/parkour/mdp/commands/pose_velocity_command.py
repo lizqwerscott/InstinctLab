@@ -318,9 +318,49 @@ class PoseVelocityCommand(CommandTerm):
         self.vel_command_b[random_velocity_env_ids, 1] = self.random_lin_vel_y[random_velocity_env_ids]
         self.vel_command_b[random_velocity_env_ids, 2] = self.random_ang_vel_z[random_velocity_env_ids]
 
+        self._apply_hugwbc_behavior_clips()
+
         # NOTE: behavior_command[:, 6:7] (raw gait-phase clock sin(2*pi*phi)) were
         # removed — the policy observes the homogenized phase clock sin(2*pi*phi_bar)
         # via the GaitPhaseClockTerm observation term instead (see mdp/rewards.py).
+
+    def _apply_hugwbc_behavior_clips(self):
+        velocity_level = torch.linalg.vector_norm(self.vel_command_b[:, :2], dim=-1)
+        velocity_level += 0.5 * torch.abs(self.vel_command_b[:, 2])
+        high_speed_mask = (velocity_level > 1.8) & ~self.is_standing_env
+
+        self.behavior_command[:, 0] = torch.where(
+            high_speed_mask,
+            torch.clamp(self.behavior_command[:, 0], min=2.0),
+            self.behavior_command[:, 0],
+        )
+
+        frequency = self.behavior_command[:, 0]
+        body_height = self.behavior_command[:, 2]
+        phase_offset = self.behavior_command[:, 5]
+        hopping_mask = torch.isclose(
+            phase_offset, torch.zeros_like(phase_offset), atol=1e-6
+        )
+        swing_height_clip_mask = (
+            (frequency > 2.5) | (body_height < -0.15) | hopping_mask
+        )
+        self.behavior_command[:, 1] = torch.where(
+            swing_height_clip_mask,
+            torch.clamp(self.behavior_command[:, 1], max=0.20),
+            self.behavior_command[:, 1],
+        )
+
+        pitch_clip_mask = high_speed_mask | (body_height < -0.2) | hopping_mask
+        self.behavior_command[:, 3] = torch.where(
+            pitch_clip_mask,
+            torch.clamp(self.behavior_command[:, 3], max=0.3),
+            self.behavior_command[:, 3],
+        )
+        self.behavior_command[:, 4] = torch.where(
+            high_speed_mask,
+            torch.clamp(self.behavior_command[:, 4], min=-0.15, max=0.15),
+            self.behavior_command[:, 4],
+        )
 
     def reset(self, env_ids: Sequence[int] | None = None):
         extras = super().reset(env_ids)
