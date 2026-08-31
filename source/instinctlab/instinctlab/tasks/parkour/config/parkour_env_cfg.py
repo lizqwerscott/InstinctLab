@@ -296,6 +296,83 @@ class ObservationsCfg:
             params={"command_name": "base_velocity", "start": 3, "end": 10},
             noise=None,
         )
+        clock_inputs = ObsTerm(
+            func=mdp.GaitPhaseClockTerm,
+            params={
+                "phase_sigma": 0.05,
+            },
+            noise=None,
+            history_length=1,
+            flatten_history_dim=True,
+        )
+        base_height_error = ObsTerm(
+            func=mdp.base_height_error,
+            params={
+                "command_name": "base_velocity",
+                "sensor_cfg": SceneEntityCfg("height_scanner_critic"),
+                "target_height": 0.9,
+            },
+            history_length=1,
+            flatten_history_dim=True,
+        )
+        foot_clearance = ObsTerm(
+            func=mdp.foot_clearance,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+                    preserve_order=True,
+                ),
+                "left_height_scanner_cfg": SceneEntityCfg("left_height_scanner"),
+                "right_height_scanner_cfg": SceneEntityCfg("right_height_scanner"),
+            },
+            history_length=1,
+            flatten_history_dim=True,
+        )
+        friction_coefficients = ObsTerm(
+            func=mdp.friction_coefficients,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            history_length=1,
+            flatten_history_dim=True,
+        )
+        foot_contact_forces = ObsTerm(
+            func=mdp.foot_contact_forces,
+            params={
+                "sensor_cfg": SceneEntityCfg(
+                    "contact_forces",
+                    body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+                    preserve_order=True,
+                ),
+            },
+            scale=0.01,
+            history_length=1,
+            flatten_history_dim=True,
+        )
+        collision_states = ObsTerm(
+            func=mdp.collision_states,
+            params={
+                "sensor_cfg": SceneEntityCfg(
+                    "contact_forces",
+                    body_names=[
+                        "torso_link",
+                        "left_shoulder_roll_link",
+                        "right_shoulder_roll_link",
+                        "left_elbow_link",
+                        "right_elbow_link",
+                        "left_wrist_yaw_link",
+                        "right_wrist_yaw_link",
+                        "left_hip_roll_link",
+                        "right_hip_roll_link",
+                        "left_knee_link",
+                        "right_knee_link",
+                    ],
+                    preserve_order=True,
+                ),
+                "threshold": 2.0,
+            },
+            history_length=1,
+            flatten_history_dim=True,
+        )
         terrain_height = ObsTerm(
             func=mdp.height_scan,
             params={"sensor_cfg": SceneEntityCfg("height_scanner_critic")},
