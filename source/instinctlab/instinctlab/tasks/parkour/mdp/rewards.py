@@ -421,7 +421,8 @@ def hugwbc_feet_symmetry(
     same_phase = torch.isclose(phase[:, 0], phase[:, 1], atol=phase_tolerance, rtol=0.0)
     robot = env.scene[asset_cfg.name]
     relative_positions = robot.data.body_pos_w[:, asset_cfg.body_ids] - robot.data.root_pos_w.unsqueeze(1)
-    positions_b = quat_apply_inverse(robot.data.root_quat_w.unsqueeze(1), relative_positions)
+    root_quat_w = robot.data.root_quat_w.unsqueeze(1).expand(-1, relative_positions.shape[1], -1)
+    positions_b = quat_apply_inverse(root_quat_w, relative_positions)
     difference = positions_b[:, 0][:, (0, 2)] - positions_b[:, 1][:, (0, 2)]
     return torch.sum(torch.square(difference), dim=-1) * same_phase
 
