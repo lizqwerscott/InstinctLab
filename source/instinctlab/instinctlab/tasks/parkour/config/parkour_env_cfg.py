@@ -15,7 +15,6 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
-from isaaclab.sensors.ray_caster.patterns import PinholeCameraPatternCfg
 from isaaclab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -29,20 +28,9 @@ from instinctlab.managers import MultiRewardCfg
 from instinctlab.motion_reference import MotionReferenceManagerCfg
 from instinctlab.sensors import (
     Grid3dPointsGeneratorCfg,
-    NoisyGroupedRayCasterCameraCfg,
     VolumePointsCfg,
 )
 from instinctlab.terrains import GreedyconcatEdgeCylinderCfg, TerrainImporterCfg
-from instinctlab.utils.noise import (
-    CropAndResizeCfg,
-    DepthArtifactNoiseCfg,
-    DepthNormalizationCfg,
-    DepthSteroNoiseCfg,
-    GaussianBlurNoiseCfg,
-    ParametricDepthNoiseCfg,
-    RandomGaussianNoiseCfg,
-    RangeBasedGaussianNoiseCfg,
-)
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 
@@ -793,23 +781,6 @@ class EventCfg:
         params={
             "position_range": (-0.15, 0.15),
             "velocity_range": (0.0, 0.0),
-        },
-    )
-
-    camera_offsets = EventTerm(
-        func=mdp.randomize_camera_offsets,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("camera"),
-            "offset_pose_ranges": {
-                "x": (-0.02, 0.02),
-                "y": (-0.02, 0.02),
-                "z": (-0.02, 0.02),
-                "roll": (-0.08, 0.08),
-                "pitch": (-0.174, 0.174),
-                "yaw": (-0.05, 0.05),
-            },
-            "distribution": "gaussian",
         },
     )
 
