@@ -60,6 +60,11 @@ class PoseVelocityCommand(CommandTerm):
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["tracking_exp_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["tracking_exp_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["command_frequency"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["command_foot_swing_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["command_body_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["command_body_pitch"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["command_waist_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
         # obtain the terrain asset
         self.terrain: TerrainImporter = env.scene["terrain"]
@@ -177,6 +182,12 @@ class PoseVelocityCommand(CommandTerm):
         self.metrics["tracking_exp_vel_yaw"] += (
             torch.exp(-angular_vel_error / self.cfg.ang_vel_metrics_std**2) / self._env.max_episode_length
         )
+        metric_scale = 1.0 / self._env.max_episode_length
+        self.metrics["command_frequency"] += self.behavior_command[:, 0] * metric_scale
+        self.metrics["command_foot_swing_height"] += self.behavior_command[:, 1] * metric_scale
+        self.metrics["command_body_height"] += self.behavior_command[:, 2] * metric_scale
+        self.metrics["command_body_pitch"] += self.behavior_command[:, 3] * metric_scale
+        self.metrics["command_waist_yaw"] += self.behavior_command[:, 4] * metric_scale
 
     def _resample_command(self, env_ids: Sequence[int]):
         # sample new position targets from the terrain
@@ -252,6 +263,8 @@ class PoseVelocityCommand(CommandTerm):
         """Re-target the position command to the current root state."""
         target_vec = self.pos_command_w - self.robot.data.root_pos_w[:, :3]
         target_dist = torch.norm(target_vec[:, :2], dim=1)
+        target_reached = target_dist <= self.cfg.target_dis_threshold
+        self.is_standing_env |= target_reached
         self.pos_command_b[:] = quat_apply_inverse(yaw_quat(self.robot.data.root_quat_w), target_vec)
         self.vel_command_b[:, :2] = self.pos_command_b[:, :2] * self.cfg.velocity_control_stiffness
 

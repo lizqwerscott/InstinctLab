@@ -635,7 +635,8 @@ class G1Rewards:
                     ".*_shoulder_.*",
                     ".*_elbow_joint",
                     ".*_wrist.*",
-                    "waist_.*",
+                    "waist_roll_joint",
+                    "waist_pitch_joint",
                 ],
             )
         },
