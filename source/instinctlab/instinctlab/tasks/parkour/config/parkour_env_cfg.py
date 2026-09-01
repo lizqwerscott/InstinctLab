@@ -408,7 +408,7 @@ class CommandsCfg:
         rel_standing_envs=0.1,  # HugWBC: 10% standing task mode at each command resample
         ranges=mdp.PoseVelocityCommandCfg.Ranges(lin_vel_x=(0.0, 0.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(-1.0, 1.0)),
         behavior_ranges=mdp.PoseVelocityCommandCfg.BehaviorRanges(
-            frequency=(1.5, 3.5),  # HugWBC gait frequency command range (Hz)
+            frequency=(1.0, 3.5),  # HugWBC gait frequency command range (Hz)
             foot_swing_height=(0.10, 0.35),  # HugWBC swing height command range (m)
             body_height=(-0.3, 0.0),
             body_pitch=(0.0, 0.4),
