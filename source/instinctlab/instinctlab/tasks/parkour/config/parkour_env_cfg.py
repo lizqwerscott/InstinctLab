@@ -625,6 +625,28 @@ class G1Rewards:
         },
     )
 
+    # ---- DCM 足端稀疏惩罚 (平地版) ----
+    # 抬脚时刻(步态相位边沿)规划一次 DCM 目标并缓存, 触地时刻惩罚
+    # ‖foot_xy − p*_xy‖² 并封顶 (cap=0.1), 纯惩罚形式 (仿 HugWBC clearance,
+    # weight 为负)。规划器只保留 d_dcm 通道; T_swing = (1 − stance_fraction)/frequency
+    # 逐环境计算; CoM 用 PhysX 整机质心。
+    foothold = RewTerm(
+        func=mdp.HugWBCDCMFootholdReward,
+        weight=-30.0,
+        params={
+            "phase_sigma": 0.05,
+            "command_name": "base_velocity",
+            "asset_cfg": SceneEntityCfg(
+                "robot", body_names=["left_ankle_roll_link", "right_ankle_roll_link"]
+            ),
+            "max_fwd_range": 0.6,
+            "max_bwd_range": 0.0,
+            "ankle_offset": 0.035,
+            "cap": 0.1,
+            "vel_gate": 0.05,
+        },
+    )
+
     upper_joint_deviation = RewTerm(
         func=instinct_mdp.joint_deviation_square,
         weight=-0.5,

@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_apply_inverse, quat_from_angle_axis
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_angle_axis, yaw_quat
+
+from instinctlab.tasks.parkour.mdp.dcm_planner import DCMFootholdPlanner
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -603,3 +605,154 @@ class HugWBCFeetClearanceReward(ManagerTermBase):
         left_z = asset.data.body_pos_w[:, self._asset_cfg.body_ids[0], 2]
         right_z = asset.data.body_pos_w[:, self._asset_cfg.body_ids[1], 2]
         return torch.stack([left_z - left_gz, right_z - right_gz], dim=-1)
+
+
+# ---------------------------------------------------------------------------
+# Reward term: sparse DCM foothold penalty (flat-ground, gait-phase driven)
+# ---------------------------------------------------------------------------
+
+
+class HugWBCDCMFootholdReward(ManagerTermBase):
+    """Sparse DCM foothold penalty driven by the HugWBC gait phase clock.
+
+    At swing onset (homogenized phase crossing 0.5 upward) the DCM planner
+    computes a foothold target once and caches it per foot; at touchdown
+    (phase crossing 0.5 downward, incl. the 1 -> 0 wrap) the foot is penalized
+    by ``clip(||foot_xy - p*_xy||^2, max=cap)`` — a pure, capped penalty in
+    the same form as HugWBC ``_reward_feet_clearance_cmd_linear`` (the RewTerm
+    weight is negative, e.g. -30).
+
+    Flat-ground only: the planner keeps only the ``d_dcm`` channel (d_pos and
+    terrain channels are masked in ``dcm_planner.py``), the heightmap is a
+    zero placeholder, ``k=None``, and the expected swing duration is computed
+    per environment from the gait command ``T_swing = (1 - duty)/frequency``.
+    The CoM uses the exact whole-body center of mass from PhysX
+    (``root_physx_view.get_com_states()``) instead of a root approximation.
+
+    Details honored: standing environments never fire events (the shared
+    tracker zeroes their phase); a velocity gate zeros the penalty when the
+    command is near zero; reset() clears the caches; each foot is penalized at
+    most once per swing (the plan flag is cleared at touchdown); planning and
+    penalizing use the same foot-center reference (ankle + forward offset).
+    """
+
+    def __init__(self, cfg, env: "ManagerBasedRLEnv"):
+        super().__init__(cfg, env)
+        self._asset_cfg = cfg.params["asset_cfg"]
+        self._command_name = cfg.params.get("command_name", "base_velocity")
+        self._planner = DCMFootholdPlanner(
+            num_envs=env.num_envs,
+            device=env.device,
+            max_fwd_range=cfg.params.get("max_fwd_range", 0.6),
+            max_bwd_range=cfg.params.get("max_bwd_range", 0.0),
+        )
+        # Per-foot caches: [left, right] (body_ids order)
+        self._p_star_cache = torch.zeros(env.num_envs, 2, 3, device=env.device)
+        self._swing_planned = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+        self._prev_phi_bar = torch.zeros(env.num_envs, 2, device=env.device)
+        self._ankle_offset = cfg.params.get("ankle_offset", 0.035)
+        self._cap = cfg.params.get("cap", 0.1)
+        self._vel_gate = cfg.params.get("vel_gate", 0.05)
+        self._tracker = get_gait_tracker(env, phase_sigma=cfg.params.get("phase_sigma", 0.05))
+
+    def __call__(
+        self,
+        env: "ManagerBasedRLEnv",
+        phase_sigma: float = 0.05,
+        asset_cfg: SceneEntityCfg | None = None,
+        command_name: str = "base_velocity",
+        max_fwd_range: float = 0.6,
+        max_bwd_range: float = 0.0,
+        ankle_offset: float = 0.035,
+        cap: float = 0.1,
+        vel_gate: float = 0.05,
+    ) -> torch.Tensor:
+        """Return the capped sparse foothold penalty (positive error; RewTerm weight < 0)."""
+        self._tracker.update(env)
+
+        asset = env.scene[self._asset_cfg.name]
+        root_pos = asset.data.root_pos_w  # (N, 3)
+        root_quat = asset.data.root_quat_w  # (N, 4) w,x,y,z
+        command = env.command_manager.get_command(self._command_name)  # (N, 3) body frame
+        v_cmd_body = command[:, :2]  # (N, 2)
+
+        # ---- Exact whole-body CoM (PhysX) ---------------------------------
+        com_pos_w, _, com_vel_w, _ = asset.root_physx_view.get_com_states()
+
+        # ---- Command velocity: body frame -> world -> yaw-local ------------
+        # The planner grid is defined in the yaw-only frame, so the commanded
+        # velocity must be expressed there too (consistent with stance/CoM).
+        v_3d = torch.cat([v_cmd_body, torch.zeros_like(v_cmd_body[:, :1])], dim=-1)
+        v_world = quat_apply(root_quat, v_3d)
+        v_yaw_local = quat_apply_inverse(yaw_quat(root_quat), v_world)[:, :2]
+
+        # ---- Foot centre (ankle + forward offset): same reference for
+        # planning (stance foot) and penalizing (swing foot) ------------------
+        body_pos = asset.data.body_pos_w[:, self._asset_cfg.body_ids]  # (N, 2, 3)
+        body_quat = asset.data.body_quat_w[:, self._asset_cfg.body_ids]  # (N, 2, 4)
+        ankle_offset_v = torch.tensor([self._ankle_offset, 0.0, 0.0], device=env.device)
+        offset_w = quat_apply(
+            body_quat.reshape(-1, 4),
+            ankle_offset_v.unsqueeze(0).expand(body_quat.shape[0] * body_quat.shape[1], -1),
+        ).reshape(-1, 2, 3)
+        foot_center = body_pos + offset_w  # (N, 2, 3)
+
+        # ---- Phase-clock edge detection ------------------------------------
+        # duty = 0.5: phi_bar in [0, 0.5) stance, [0.5, 1) swing.
+        phi_bar = self._tracker.homogenized_phase()  # (N, 2)
+        prev = self._prev_phi_bar
+        swing_onset = (prev < 0.5) & (phi_bar >= 0.5)  # lift-off
+        touchdown = (prev >= 0.5) & (phi_bar < 0.5)  # touch-down (incl. 1->0 wrap)
+        self._prev_phi_bar = phi_bar.clone()
+
+        # ---- Expected swing duration per env: T_swing = (1 - duty)/freq ----
+        behavior = env.command_manager.get_term(self._command_name).behavior_command  # (N, 7)
+        freq = behavior[:, 0].clamp(min=1e-3)
+        duty = behavior[:, 6].clamp(1e-3, 1.0 - 1e-3)
+        T_swing = (1.0 - duty) / freq  # (N,)
+
+        # ---- Plan once per foot at swing onset, cache the target -----------
+        # Left foot swing onset (foot_idx 0) -> stance = right foot, sign = +1;
+        # right foot swing onset (foot_idx 1) -> stance = left foot, sign = -1.
+        for foot_idx in range(2):
+            mask = swing_onset[:, foot_idx]
+            if mask.any():
+                sign = torch.ones(mask.sum(), device=env.device) if foot_idx == 0 else -torch.ones(
+                    mask.sum(), device=env.device
+                )
+                p_new = self._planner.plan_in_world(
+                    torch.zeros(mask.sum(), self._planner.grid_h, self._planner.grid_w, device=env.device),
+                    v_yaw_local[mask],
+                    foot_center[mask, 1 - foot_idx],  # stance foot (opposite side)
+                    root_pos[mask],
+                    root_quat[mask],
+                    sign,
+                    com_pos_w=com_pos_w[mask],
+                    com_vel_w=com_vel_w[mask],
+                    k=None,
+                    T_swing=T_swing[mask],
+                )
+                self._p_star_cache[mask, foot_idx] = p_new
+                self._swing_planned[mask, foot_idx] = True
+
+        # ---- Sparse touchdown penalty (capped, xy plane only) --------------
+        reward = torch.zeros(env.num_envs, device=env.device)
+        td_active = touchdown & self._swing_planned  # one-shot per swing per foot
+        for foot_idx in range(2):
+            td_mask = td_active[:, foot_idx]
+            if td_mask.any():
+                d = foot_center[td_mask, foot_idx] - self._p_star_cache[td_mask, foot_idx]  # (M, 3)
+                d_sq = (d[:, :2] ** 2).sum(dim=-1)  # xy only (z handled by clearance)
+                reward[td_mask] += d_sq.clamp(max=self._cap)
+                self._swing_planned[td_mask, foot_idx] = False
+
+        # ---- Velocity gate: no penalty when standing / near-zero command ----
+        has_lin_vel = torch.norm(v_cmd_body, dim=1) > self._vel_gate
+        reward = torch.where(has_lin_vel, reward, torch.zeros_like(reward))
+
+        return reward
+
+    def reset(self, env_ids: Sequence[int] | slice):
+        self._p_star_cache[env_ids] = 0.0
+        self._swing_planned[env_ids] = False
+        self._prev_phi_bar[env_ids] = 0.0

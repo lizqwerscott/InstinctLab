@@ -146,7 +146,9 @@ class DCMFootholdPlanner:
     # -----------------------------------------------------------------------
     # Shared channel computation
     # -----------------------------------------------------------------------
-    def _compute_dcm_params(self, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_dcm_params(
+        self, k: torch.Tensor, T_swing: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute per-environment DCM parameters for sloped terrain.
 
         Given slope k, the CoM height varies linearly with time:
@@ -178,17 +180,20 @@ class DCMFootholdPlanner:
         sqrt_g = math.sqrt(g)
         sqrt_z0 = math.sqrt(self.z0)
 
-        # Flat ground limit value: exp(ω₀·T)
-        exp_flat = self.exp_wT_flat
-
-        # Start with flat-ground default for all environments
-        exp_sigma = torch.full_like(k, exp_flat)
+        # Flat-ground default: exp(ω₀·T) with per-env T (T_swing) if given,
+        # else the construction-time exp_wT_flat (fixed self.T).
+        if T_swing is not None:
+            exp_sigma = torch.exp(self.omega0 * T_swing)  # (N,)
+        else:
+            exp_sigma = torch.full_like(k, self.exp_wT_flat)
 
         # Only compute sloped formula for non-flat environments (avoid 0/0)
         non_flat = k.abs() > 1e-6
         if torch.any(non_flat):
             k_nf = k[non_flat]
-            kT_z0_nf = k_nf * self.T + self.z0
+            # Expected swing duration: per-env T_swing if given, else construction-time self.T
+            T_nf = T_swing[non_flat] if T_swing is not None else self.T
+            kT_z0_nf = k_nf * T_nf + self.z0
             kT_z0_nf = torch.clamp(kT_z0_nf, min=1e-8)
             sqrt_kT_z0_nf = torch.sqrt(kT_z0_nf)
             sigma_T_nf = 2.0 * sqrt_g * (sqrt_kT_z0_nf - sqrt_z0) / k_nf
@@ -211,12 +216,18 @@ class DCMFootholdPlanner:
         com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
+        T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
     ) -> dict[str, torch.Tensor]:
         """Compute all intermediate cost channels.
 
         Returns dict with keys:
-            Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
+            d_dcm, J, valid, h_safe, L_nom, W_nom
         each of shape (N, H, W) except valid (bool).
+
+        NOTE (flat-ground masking): the terrain channels (Q, E, M, b) and the
+        position residual (d_pos) are commented out — only the DCM residual
+        (d_dcm) contributes to J. Restore the commented blocks for stair
+        terrain.
         """
         N = heightmap.shape[0]
         H, W = self.grid_h, self.grid_w
@@ -228,58 +239,55 @@ class DCMFootholdPlanner:
         x_mask = (self.grid_x >= -self.max_bwd_range) & (self.grid_x <= self.max_fwd_range)
         valid = valid & x_mask.unsqueeze(0)
 
-        # Q: -inf/+inf sentinels so invalid cells never win max/min.
-        h_for_max = torch.where(
-            valid,
-            heightmap,
-            torch.tensor(float("-inf"), device=device, dtype=heightmap.dtype),
-        ).unsqueeze(1)
-        h_for_min = torch.where(
-            valid, -heightmap, torch.tensor(float("-inf"), device=device, dtype=heightmap.dtype)
-        ).unsqueeze(1)
-
-        # For M, E, and argmin z-lookup: 0-fill (neutral for dz).
+        # [屏蔽] 地形通道 Q/E/M/b 所需量 (楼梯地形时恢复):
+        #   h_for_max / h_for_min 仅 Q 用; pad_h/pad_w 仅 Q/E 用。
+        # For argmin z-lookup: 0-fill (neutral for dz).
         h_safe = torch.where(valid, heightmap, torch.zeros_like(heightmap))
 
-        pad_h, pad_w = self.fp_h // 2, self.fp_w // 2
-
-        # =================================================================
-        # Channel 1: Flatness Q (Eq. 2)
-        # =================================================================
-        Q_max = F.max_pool2d(h_for_max, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w))
-        Q_neg_min = F.max_pool2d(h_for_min, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w))
-        Q_min = -Q_neg_min
-        Q = (Q_max - Q_min).squeeze(1)[:, :H, :W]
-
-        # =================================================================
-        # Channel 2: Steepness E (Eq. 3)
-        # =================================================================
-        h_in = h_safe.unsqueeze(1)
-        gx = F.conv2d(h_in, self.kx, padding=1)
-        gy = F.conv2d(h_in, self.ky, padding=1)
-        grad = torch.sqrt(gx**2 + gy**2 + 1e-6)
-        E = F.max_pool2d(grad, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w)).squeeze(1)[:, :H, :W]
-
-        # =================================================================
-        # Channel 3 & 4: Feasibility M and Climb bonus b (Eq. 4-5)
-        # =================================================================
         vx = v_cmd[:, 0]
         vy = v_cmd[:, 1]
-        vx_abs = vx.abs()
-        h_eff = self.h_min + (self.h_max - self.h_min) * torch.clamp(vx_abs / self.v_star, 0.0, 1.0)
-        h_eff_map = h_eff.view(N, 1, 1)
-
-        stance_z = stance_xyz_local[:, 2]
-        dz = h_safe - stance_z.view(N, 1, 1)
-        abs_dz = dz.abs()
-
-        M = torch.clamp(abs_dz - h_eff_map, min=0.0) ** 2
-
-        climb_pos = torch.clamp(dz, min=0.0).clamp(max=h_eff_map)
-        b = climb_pos * (vx_abs > self.v_min).view(N, 1, 1).float()
 
         # =================================================================
-        # Position residual d_pos (Eq. 1 first term)
+        # [屏蔽] Channel 1: Flatness Q (Eq. 2) — 平地不需要 (楼梯地形时恢复)
+        # =================================================================
+        # h_for_max = torch.where(
+        #     valid,
+        #     heightmap,
+        #     torch.tensor(float("-inf"), device=device, dtype=heightmap.dtype),
+        # ).unsqueeze(1)
+        # h_for_min = torch.where(
+        #     valid, -heightmap, torch.tensor(float("-inf"), device=device, dtype=heightmap.dtype)
+        # ).unsqueeze(1)
+        # pad_h, pad_w = self.fp_h // 2, self.fp_w // 2
+        # Q_max = F.max_pool2d(h_for_max, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w))
+        # Q_neg_min = F.max_pool2d(h_for_min, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w))
+        # Q_min = -Q_neg_min
+        # Q = (Q_max - Q_min).squeeze(1)[:, :H, :W]
+
+        # =================================================================
+        # [屏蔽] Channel 2: Steepness E (Eq. 3) — 平地不需要 (楼梯地形时恢复)
+        # =================================================================
+        # h_in = h_safe.unsqueeze(1)
+        # gx = F.conv2d(h_in, self.kx, padding=1)
+        # gy = F.conv2d(h_in, self.ky, padding=1)
+        # grad = torch.sqrt(gx**2 + gy**2 + 1e-6)
+        # E = F.max_pool2d(grad, (self.fp_h, self.fp_w), stride=1, padding=(pad_h, pad_w)).squeeze(1)[:, :H, :W]
+
+        # =================================================================
+        # [屏蔽] Channel 3 & 4: Feasibility M and Climb bonus b (Eq. 4-5) — 平地不需要
+        # =================================================================
+        # vx_abs = vx.abs()
+        # h_eff = self.h_min + (self.h_max - self.h_min) * torch.clamp(vx_abs / self.v_star, 0.0, 1.0)
+        # h_eff_map = h_eff.view(N, 1, 1)
+        # stance_z = stance_xyz_local[:, 2]
+        # dz = h_safe - stance_z.view(N, 1, 1)
+        # abs_dz = dz.abs()
+        # M = torch.clamp(abs_dz - h_eff_map, min=0.0) ** 2
+        # climb_pos = torch.clamp(dz, min=0.0).clamp(max=h_eff_map)
+        # b = climb_pos * (vx_abs > self.v_min).view(N, 1, 1).float()
+
+        # =================================================================
+        # Nominal step length/width (L_nom/W_nom feed b_nom and d_dcm; T per-env)
         # =================================================================
         gx_map = self.grid_x.unsqueeze(0)
         gy_map = self.grid_y.unsqueeze(0)
@@ -287,11 +295,17 @@ class DCMFootholdPlanner:
         vy_map = vy.view(N, 1, 1)
         sgn_map = swing_leg_sign.view(N, 1, 1).float()
 
-        # ---- Nominal step length and width (common to d_pos and b_nom) ----
-        L_nom = vx_map * self.T  # (N,1,1)  = vx·T
-        W_nom = vy_map * self.T + sgn_map * self.lp  # (N,1,1)  = vy·T + (-1)ⁱ·l
+        # Expected swing duration T: None → construction-time self.T;
+        # otherwise per-env (N,) broadcast to (N,1,1).
+        T_map = T_swing.view(N, 1, 1) if T_swing is not None else self.T
 
-        d_pos = (gx_map - L_nom) ** 2 + self.beta * (gy_map - W_nom) ** 2
+        L_nom = vx_map * T_map  # (N,1,1)  = vx·T
+        W_nom = vy_map * T_map + sgn_map * self.lp  # (N,1,1)  = vy·T + (-1)ⁱ·l
+
+        # =================================================================
+        # [屏蔽] Position residual d_pos (Eq. 1 first term) — 平地不需要 (楼梯地形时恢复)
+        # =================================================================
+        # d_pos = (gx_map - L_nom) ** 2 + self.beta * (gy_map - W_nom) ** 2
 
         # =================================================================
         # DCM residual d_dcm (Eq. 1 second term)
@@ -314,7 +328,7 @@ class DCMFootholdPlanner:
         # =================================================================
         # _compute_dcm_params handles both flat and sloped internally
         if k is not None:
-            exp_sigma, exp_sigma_m1 = self._compute_dcm_params(k)  # both (N,)
+            exp_sigma, exp_sigma_m1 = self._compute_dcm_params(k, T_swing)  # both (N,)
 
             exp_sigma_exp = exp_sigma.view(N, 1, 1)
             exp_sigma_m1_exp = exp_sigma_m1.view(N, 1, 1)
@@ -345,11 +359,14 @@ class DCMFootholdPlanner:
             # ---- k is None → all environments are flat ----
             sgn_exp = swing_leg_sign.float().view(N, 1, 1)
 
-            # b_nom_x = L_nom / (e^{ω₀·T}−1)   (= vx · bx_coef_flat)
-            bx_map = L_nom / (self.exp_wT_flat - 1.0)
+            # e^{ω₀·T}: per-env T (T_swing) if given, else construction-time exp_wT_flat
+            exp_sigma_flat = torch.exp(self.omega0 * T_map) if T_swing is not None else self.exp_wT_flat
 
-            one_plus_exp_flat = 1.0 + self.exp_wT_flat
-            by_map = (sgn_exp * self.lp) / one_plus_exp_flat + W_nom / (self.exp_wT_flat - 1.0)
+            # b_nom_x = L_nom / (e^{ω₀·T}−1)   (= vx · bx_coef_flat)
+            bx_map = L_nom / (exp_sigma_flat - 1.0)
+
+            one_plus_exp_flat = 1.0 + exp_sigma_flat
+            by_map = (sgn_exp * self.lp) / one_plus_exp_flat + W_nom / (exp_sigma_flat - 1.0)
 
             # ξ_T = u₀ + (ξ₀ − u₀)·e^{ω₀·T},  u₀ = stance foot (CoP) in pelvis-local
             if com_local is not None and com_vel_local is not None:
@@ -357,8 +374,8 @@ class DCMFootholdPlanner:
                 xi_0_y = com_local[:, 1] + com_vel_local[:, 1] / self.omega0
                 u0_x = stance_xyz_local[:, 0]
                 u0_y = stance_xyz_local[:, 1]
-                xi_T_x = (u0_x + (xi_0_x - u0_x) * self.exp_wT_flat).view(N, 1, 1)
-                xi_T_y = (u0_y + (xi_0_y - u0_y) * self.exp_wT_flat).view(N, 1, 1)
+                xi_T_x = (u0_x + (xi_0_x - u0_x) * exp_sigma_flat).view(N, 1, 1)
+                xi_T_y = (u0_y + (xi_0_y - u0_y) * exp_sigma_flat).view(N, 1, 1)
             else:
                 xi_T_x = gx_map + bx_map
                 xi_T_y = gy_map + by_map
@@ -367,24 +384,21 @@ class DCMFootholdPlanner:
 
         # =================================================================
         # Total cost (Eq. 1)
+        # [屏蔽] 平地版: 只保留 d_dcm 通道 (楼梯地形时恢复 d_pos / E / Q / M / b)
         # =================================================================
         J = (
-            self.alpha_pos * d_pos
-            + self.alpha_dcm * d_dcm
-            + self.alpha_E * E
-            + self.alpha_Q * Q
-            + self.alpha_M * M
-            - self.alpha_climb * b
+            # self.alpha_pos * d_pos
+            self.alpha_dcm * d_dcm
+            # + self.alpha_E * E
+            # + self.alpha_Q * Q
+            # + self.alpha_M * M
+            # - self.alpha_climb * b
         )
 
         J = torch.where(valid, J, torch.full_like(J, float("inf")))
 
         return {
-            "Q": Q,
-            "E": E,
-            "M": M,
-            "b": b,
-            "d_pos": d_pos,
+            # [屏蔽] 地形通道与 d_pos (楼梯地形时恢复): "Q", "E", "M", "b", "d_pos"
             "d_dcm": d_dcm,
             "J": J,
             "valid": valid,
@@ -405,6 +419,7 @@ class DCMFootholdPlanner:
         com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
+        T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
     ) -> torch.Tensor:
         """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
         channels = self._compute_channels(
@@ -415,6 +430,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            T_swing=T_swing,
         )
         return self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)[0]
 
@@ -464,11 +480,12 @@ class DCMFootholdPlanner:
         com_local: torch.Tensor | None = None,  # (N, 2) CoM (x, y) in pelvis-local
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
+        T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Returns (p_star, channels) where channels contains all intermediate costs.
 
         p_star: (N, 3) best foothold in pelvis-local frame.
-        channels: dict with keys Q, E, M, b, d_pos, d_dcm, J, valid, h_safe.
+        channels: dict with keys d_dcm, J, valid, h_safe, L_nom, W_nom.
         """
         channels = self._compute_channels(
             heightmap,
@@ -478,6 +495,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            T_swing=T_swing,
         )
         p_star, best_idx = self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)
         channels["best_idx"] = best_idx
@@ -494,11 +512,12 @@ class DCMFootholdPlanner:
         com_pos_w: torch.Tensor | None = None,  # (N, 3) CoM world pos
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
+        T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute a world-frame foothold from yaw-local velocity and return cost channels.
 
         Returns (p_world, channels) where channels has keys:
-            Q, E, M, b, d_pos, d_dcm, J, valid, h_safe
+            d_dcm, J, valid, h_safe, L_nom, W_nom
         all in pelvis-local frame (shape N, H, W).
         """
         root_yaw_quat_w = yaw_quat(root_quat_w)
@@ -521,6 +540,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            T_swing=T_swing,
         )
 
         # -- Rotate back: yaw-local -> world --
@@ -541,6 +561,7 @@ class DCMFootholdPlanner:
         com_pos_w: torch.Tensor | None = None,  # (N, 3) CoM world pos
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
+        T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
     ) -> torch.Tensor:
         """Compute a world-frame foothold from yaw-local velocity."""
         root_yaw_quat_w = yaw_quat(root_quat_w)
@@ -563,6 +584,7 @@ class DCMFootholdPlanner:
             com_local,
             com_vel_local,
             k=k,
+            T_swing=T_swing,
         )
 
         # -- Rotate back: pelvis-local -> world (yaw-only, matching heightmap) --
