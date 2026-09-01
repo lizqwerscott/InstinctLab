@@ -14,6 +14,8 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.terrains import TerrainImporter
 from isaaclab.utils.math import quat_apply_inverse, wrap_to_pi, yaw_quat
 
+from ..rewards import _polynomial_planer, get_gait_tracker
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -43,6 +45,10 @@ class PoseVelocityCommand(CommandTerm):
         # obtain the robot and terrain assets
         # -- robot
         self.robot: Articulation = env.scene[cfg.asset_name]
+        self._waist_yaw_joint_ids = self.robot.find_joints("waist_yaw_joint")[0]
+        self._foot_body_ids = self.robot.find_bodies(
+            ["left_ankle_roll_link", "right_ankle_roll_link"], preserve_order=True
+        )[0]
 
         # crete buffers to store the command
         self.pos_command_w = torch.zeros(self.num_envs, 3, device=self.device)
@@ -60,11 +66,14 @@ class PoseVelocityCommand(CommandTerm):
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["tracking_exp_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["tracking_exp_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["command_frequency"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["command_foot_swing_height"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["command_body_height"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["command_body_pitch"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["command_waist_yaw"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["tracking_body_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["tracking_body_pitch"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["tracking_waist_yaw"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["tracking_foot_swing_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["error_body_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["error_body_pitch"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["error_waist_yaw"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["error_foot_swing_height"] = torch.zeros(self.num_envs, device=self.device)
 
         # obtain the terrain asset
         self.terrain: TerrainImporter = env.scene["terrain"]
@@ -183,11 +192,84 @@ class PoseVelocityCommand(CommandTerm):
             torch.exp(-angular_vel_error / self.cfg.ang_vel_metrics_std**2) / self._env.max_episode_length
         )
         metric_scale = 1.0 / self._env.max_episode_length
-        self.metrics["command_frequency"] += self.behavior_command[:, 0] * metric_scale
-        self.metrics["command_foot_swing_height"] += self.behavior_command[:, 1] * metric_scale
-        self.metrics["command_body_height"] += self.behavior_command[:, 2] * metric_scale
-        self.metrics["command_body_pitch"] += self.behavior_command[:, 3] * metric_scale
-        self.metrics["command_waist_yaw"] += self.behavior_command[:, 4] * metric_scale
+
+        height_scanner = self._env.scene["height_scanner_critic"]
+        ray_heights = height_scanner.data.ray_hits_w[..., 2]
+        ray_heights = torch.where(torch.isfinite(ray_heights), ray_heights, torch.zeros_like(ray_heights))
+        terrain_height = ray_heights.mean(dim=-1)
+        desired_body_height = 0.9 + self.behavior_command[:, 2]
+        body_height_error = torch.abs(self.robot.data.root_pos_w[:, 2] - terrain_height - desired_body_height)
+        self.metrics["tracking_body_height"] += (
+            torch.exp(-((body_height_error / self.cfg.body_height_metrics_std) ** 2)) * metric_scale
+        )
+        self.metrics["error_body_height"] += body_height_error * metric_scale
+
+        pitch_axis = torch.zeros_like(self.robot.data.root_pos_w)
+        pitch_axis[:, 1] = 1.0
+        pitch_quat = math_utils.quat_from_angle_axis(self.behavior_command[:, 3], pitch_axis)
+        desired_projected_gravity = quat_apply_inverse(pitch_quat, self.robot.data.GRAVITY_VEC_W)
+        projected_gravity = quat_apply_inverse(self.robot.data.root_quat_w, self.robot.data.GRAVITY_VEC_W)
+        body_pitch_error = torch.linalg.vector_norm(projected_gravity[:, :2] - desired_projected_gravity[:, :2], dim=-1)
+        self.metrics["tracking_body_pitch"] += (
+            torch.exp(-((body_pitch_error / self.cfg.body_pitch_metrics_std) ** 2)) * metric_scale
+        )
+        self.metrics["error_body_pitch"] += body_pitch_error * metric_scale
+
+        waist_yaw_error = torch.abs(
+            self.robot.data.joint_pos[:, self._waist_yaw_joint_ids]
+            - self.robot.data.default_joint_pos[:, self._waist_yaw_joint_ids]
+            - self.behavior_command[:, 4:5]
+        ).mean(dim=-1)
+        self.metrics["tracking_waist_yaw"] += (
+            torch.exp(-((waist_yaw_error / self.cfg.waist_yaw_metrics_std) ** 2)) * metric_scale
+        )
+        self.metrics["error_waist_yaw"] += waist_yaw_error * metric_scale
+
+        tracker = get_gait_tracker(self._env, phase_sigma=0.05)
+        tracker.update(self._env)
+        phi_bar = tracker.homogenized_phase()
+        phases = torch.clamp(0.75 - torch.abs(phi_bar - 0.75), 0.0, 1.0)
+        coef = _polynomial_planer(0.5, 0.75, 0, 1)
+        p = phases - 0.5
+        curve = coef[0] + coef[1] * p + coef[2] * p**2 + coef[3] * p**3 + coef[4] * p**4 + coef[5] * p**5
+        curve = torch.where(phases < 0.5, torch.zeros_like(curve), curve)
+        target_foot_height = tracker.swing_height.unsqueeze(-1) * curve + 0.07
+
+        left_scanner = self._env.scene["left_height_scanner"]
+        right_scanner = self._env.scene["right_height_scanner"]
+        left_ground = torch.where(
+            torch.isfinite(left_scanner.data.ray_hits_w[..., 2]),
+            left_scanner.data.ray_hits_w[..., 2],
+            torch.zeros_like(left_scanner.data.ray_hits_w[..., 2]),
+        ).mean(dim=-1)
+        right_ground = torch.where(
+            torch.isfinite(right_scanner.data.ray_hits_w[..., 2]),
+            right_scanner.data.ray_hits_w[..., 2],
+            torch.zeros_like(right_scanner.data.ray_hits_w[..., 2]),
+        ).mean(dim=-1)
+        foot_height = torch.stack(
+            [
+                self.robot.data.body_pos_w[:, self._foot_body_ids[0], 2] - left_ground,
+                self.robot.data.body_pos_w[:, self._foot_body_ids[1], 2] - right_ground,
+            ],
+            dim=-1,
+        )
+        swing_weight = 1.0 - tracker.contact_prob()
+        foot_swing_height_error = torch.abs(target_foot_height - foot_height)
+        swing_weight_sum = swing_weight.sum(dim=-1)
+        foot_error = torch.where(
+            swing_weight_sum > 1.0e-6,
+            torch.sum(foot_swing_height_error * swing_weight, dim=-1) / swing_weight_sum.clamp_min(1.0e-6),
+            torch.zeros_like(swing_weight_sum),
+        )
+        foot_tracking = torch.exp(-((foot_swing_height_error / self.cfg.foot_swing_height_metrics_std) ** 2))
+        foot_tracking = torch.where(
+            swing_weight_sum > 1.0e-6,
+            torch.sum(foot_tracking * swing_weight, dim=-1) / swing_weight_sum.clamp_min(1.0e-6),
+            torch.ones_like(swing_weight_sum),
+        )
+        self.metrics["tracking_foot_swing_height"] += foot_tracking * metric_scale
+        self.metrics["error_foot_swing_height"] += foot_error * metric_scale
 
     def _resample_command(self, env_ids: Sequence[int]):
         # sample new position targets from the terrain

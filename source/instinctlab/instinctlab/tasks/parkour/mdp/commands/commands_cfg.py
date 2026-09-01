@@ -89,6 +89,18 @@ class PoseVelocityCommandCfg(CommandTermCfg):
     ang_vel_metrics_std: float = 0.5
     """Standard deviation for the angular velocity metrics."""
 
+    body_height_metrics_std: float = 0.05
+    """Standard deviation for body-height tracking metrics, in meters."""
+
+    body_pitch_metrics_std: float = 0.1
+    """Standard deviation for body-pitch tracking metrics, in radians."""
+
+    waist_yaw_metrics_std: float = 0.2
+    """Standard deviation for waist-yaw tracking metrics, in radians."""
+
+    foot_swing_height_metrics_std: float = 0.05
+    """Standard deviation for foot swing-height tracking metrics, in meters."""
+
     rel_standing_envs: float = 0.0
     """The sampled probability of environments that should be standing still. Defaults to 0.0."""
 
