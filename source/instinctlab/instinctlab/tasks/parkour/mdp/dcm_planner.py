@@ -75,7 +75,11 @@ class DCMFootholdPlanner:
         grid_w: int = 37,  # cols = x direction
         cell_size: float = 0.05,
         # LIPM
-        z0: float = 0.82,
+        # z0 = LIPM pendulum height. Set to the robot base (pelvis) height in the
+        # normal standing posture (robot = BeyondMimic main.urdf, init pelvis 0.76 m;
+        # FK: foot frame 0.7585 m below pelvis at the default stance). Re-tune in
+        # sim against the actual whole-body CoM height if needed.
+        z0: float = 0.76,
         T: float = 0.45,
         lp: float = 0.20,
         # Footprint kernel (in cells)

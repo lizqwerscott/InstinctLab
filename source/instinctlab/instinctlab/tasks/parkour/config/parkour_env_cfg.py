@@ -297,7 +297,8 @@ class ObservationsCfg:
             params={
                 "command_name": "base_velocity",
                 "sensor_cfg": SceneEntityCfg("height_scanner_critic"),
-                "target_height": 0.9,
+                # root/base = pelvis (BeyondMimic main.urdf), standing pelvis 0.76 m
+                "target_height": 0.76,
             },
             history_length=1,
             flatten_history_dim=True,
@@ -468,7 +469,8 @@ class G1Rewards:
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("height_scanner_critic"),
-            "target_height": 0.9,
+            # root/base = pelvis (BeyondMimic main.urdf), standing pelvis 0.76 m
+            "target_height": 0.76,
         },
     )
     body_pitch_tracking = RewTerm(
@@ -722,7 +724,9 @@ class TerminationsCfg:
         },
     )
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 1.0})
-    root_height = DoneTerm(func=mdp.root_height_below_env_origin_minimum, params={"minimum_height": 0.5})
+    # root/base = pelvis (BeyondMimic main.urdf). Standing pelvis 0.76 m,
+    # deepest legit crouch (body_height cmd -0.3) ~0.46 m -> 0.1 m margin.
+    root_height = DoneTerm(func=mdp.root_height_below_env_origin_minimum, params={"minimum_height": 0.36})
 
 
 @configclass

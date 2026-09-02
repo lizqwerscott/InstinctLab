@@ -556,7 +556,10 @@ G1_29DOF_TORSOBASE_POPSICLE_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.82),
+        # Robot definition/config replaced with BeyondMimic (whole_body_tracking
+        # robots/g1.py): URDF content = unitree_description main.urdf (pelvis
+        # root), init pelvis height 0.76 m.
+        pos=(0.0, 0.0, 0.76),
         joint_pos={
             ".*_hip_pitch_joint": -0.312,
             ".*_knee_joint": 0.669,

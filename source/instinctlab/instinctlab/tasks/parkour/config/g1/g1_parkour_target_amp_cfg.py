@@ -20,7 +20,8 @@ from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG,
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 G1_CFG = copy.deepcopy(G1_29DOF_TORSOBASE_POPSICLE_CFG)
 G1_CFG.spawn.merge_fixed_joints = True
-G1_CFG.init_state.pos = (0.0, 0.0, 0.9)
+# Robot is BeyondMimic main.urdf (pelvis root) now -> init pelvis height 0.76 m.
+G1_CFG.init_state.pos = (0.0, 0.0, 0.76)
 G1_with_shoe_CFG = copy.deepcopy(G1_CFG)
 G1_with_shoe_CFG.spawn.asset_path = os.path.abspath(
     f"{__file_dir__}/../../urdf/g1_29dof_torsoBase_popsicle_with_shoe.urdf"
