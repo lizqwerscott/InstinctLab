@@ -217,6 +217,7 @@ class DCMFootholdPlanner:
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
         T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = no deflection
     ) -> dict[str, torch.Tensor]:
         """Compute all intermediate cost channels.
 
@@ -301,6 +302,30 @@ class DCMFootholdPlanner:
 
         L_nom = vx_map * T_map  # (N,1,1)  = vx·T
         W_nom = vy_map * T_map + sgn_map * self.lp  # (N,1,1)  = vy·T + (-1)ⁱ·l
+
+        # =================================================================
+        # Turning (yaw deflection): chord-aimed nominal step (Δψ = ω_z·T)
+        # =================================================================
+        # 摆动期内机体偏转 Δψ = ω_z·T_swing。CoM 走圆弧:
+        #   - 平动分量 (v·T) 沿圆弧弦方向 → 旋转 Δψ/2
+        #   - 侧向偏移 (±lp) 触地时刻随机体朝向 → 旋转 Δψ
+        # b_nom 读 L_nom/W_nom, 偏转自动流入目标 p* = ξ_T − b_nom。
+        # DCM 点 ξ_T 保持世界系公式不动 (转弯已体现在真实 CoM 状态中)。
+        # omega_z=None 或 0 → 全部增量为 0, 退化为直线步态 (与原公式逐位一致)。
+        if omega_z is not None:
+            dpsi = omega_z.view(N, 1, 1) * T_map  # (N,1,1) total yaw over swing
+            dpsi_half = 0.5 * dpsi
+            trans_x = vx_map * T_map  # 平动分量 x = vx·T
+            trans_y = vy_map * T_map  # 平动分量 y = vy·T
+            sin_h, cos_h = torch.sin(dpsi_half), torch.cos(dpsi_half)
+            # 1) 平动 (v·T) 旋转 Δψ/2 (弦方向)
+            rot_tx = trans_x * (cos_h - 1.0) - trans_y * sin_h
+            rot_ty = trans_x * sin_h + trans_y * (cos_h - 1.0)
+            # 2) 侧向偏移 (±lp) 旋转 Δψ (触地时刻机体朝向)
+            rot_x = -sgn_map * self.lp * torch.sin(dpsi)
+            rot_y = sgn_map * self.lp * (torch.cos(dpsi) - 1.0)
+            L_nom = L_nom + rot_tx + rot_x
+            W_nom = W_nom + rot_ty + rot_y
 
         # =================================================================
         # [屏蔽] Position residual d_pos (Eq. 1 first term) — 平地不需要 (楼梯地形时恢复)
@@ -420,6 +445,7 @@ class DCMFootholdPlanner:
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
         T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = no deflection
     ) -> torch.Tensor:
         """Returns p_star (N, 3): best (x, y, z) in pelvis-local frame."""
         channels = self._compute_channels(
@@ -431,6 +457,7 @@ class DCMFootholdPlanner:
             com_vel_local,
             k=k,
             T_swing=T_swing,
+            omega_z=omega_z,
         )
         return self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)[0]
 
@@ -481,6 +508,7 @@ class DCMFootholdPlanner:
         com_vel_local: torch.Tensor | None = None,  # (N, 2) CoM velocity in pelvis-local
         k: torch.Tensor | None = None,  # (N,) per-environment slope, None = all flat
         T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = no deflection
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Returns (p_star, channels) where channels contains all intermediate costs.
 
@@ -496,6 +524,7 @@ class DCMFootholdPlanner:
             com_vel_local,
             k=k,
             T_swing=T_swing,
+            omega_z=omega_z,
         )
         p_star, best_idx = self._argmin(channels["J"], channels["h_safe"], v_cmd[:, 0].abs(), stance_xyz_local)
         channels["best_idx"] = best_idx
@@ -513,6 +542,7 @@ class DCMFootholdPlanner:
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
         T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = no deflection
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute a world-frame foothold from yaw-local velocity and return cost channels.
 
@@ -541,6 +571,7 @@ class DCMFootholdPlanner:
             com_vel_local,
             k=k,
             T_swing=T_swing,
+            omega_z=omega_z,
         )
 
         # -- Rotate back: yaw-local -> world --
@@ -562,6 +593,7 @@ class DCMFootholdPlanner:
         com_vel_w: torch.Tensor | None = None,  # (N, 3) CoM world vel
         k: torch.Tensor | None = None,  # (N,) per-environment slope
         T_swing: torch.Tensor | None = None,  # (N,) expected swing duration per env, None = self.T
+        omega_z: torch.Tensor | None = None,  # (N,) body-frame yaw rate (rad/s), None = no deflection
     ) -> torch.Tensor:
         """Compute a world-frame foothold from yaw-local velocity."""
         root_yaw_quat_w = yaw_quat(root_quat_w)
@@ -585,6 +617,7 @@ class DCMFootholdPlanner:
             com_vel_local,
             k=k,
             T_swing=T_swing,
+            omega_z=omega_z,
         )
 
         # -- Rotate back: pelvis-local -> world (yaw-only, matching heightmap) --

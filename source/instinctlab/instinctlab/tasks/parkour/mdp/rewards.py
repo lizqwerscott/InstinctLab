@@ -675,6 +675,7 @@ class HugWBCDCMFootholdReward(ManagerTermBase):
         root_quat = asset.data.root_quat_w  # (N, 4) w,x,y,z
         command = env.command_manager.get_command(self._command_name)  # (N, 3) body frame
         v_cmd_body = command[:, :2]  # (N, 2)
+        omega_z = command[:, 2]  # (N,) body-frame yaw rate (rad/s) — chord-aimed footstep deflection
 
         # ---- Exact whole-body CoM (PhysX) ---------------------------------
         com_pos_w, _, com_vel_w, _ = asset.root_physx_view.get_com_states()
@@ -731,6 +732,7 @@ class HugWBCDCMFootholdReward(ManagerTermBase):
                     com_vel_w=com_vel_w[mask],
                     k=None,
                     T_swing=T_swing[mask],
+                    omega_z=omega_z[mask],
                 )
                 self._p_star_cache[mask, foot_idx] = p_new
                 self._swing_planned[mask, foot_idx] = True
